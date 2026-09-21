@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  IMPORTER
+  TRUCK_OWNER
+  ADMIN
+}
+
+enum TruckStatus {
+  AVAILABLE
+  UNAVAILABLE
+}
+
+enum BookingStatus {
+  PENDING
+  ACCEPTED
+  IN_PROGRESS
+  DELIVERED
+  COMPLETED
+  DISPUTED
+  REJECTED
+}
+
+enum DisputeStatus {
+  OPEN
+  RESOLVED
+}
+
+model User {
+  id           String    @id @default(uuid())
+  name         String
+  email        String    @unique
+  phone        String?
+  passwordHash String
+  role         UserRole
+  location     String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  trucks       Truck[]
+  bookings     Booking[]
+  disputes     Dispute[] @relation("RaisedDisputes")
+
+  @@index([role])
+}
+
+model Truck {
+  id              String      @id @default(uuid())
+  ownerId         String
+  plateNumber     String      @unique
+  truckType       String
+  capacity        Float
+  currentLocation String?
+  preferredRoute  String?
+  description     String?
+  photos          String[]    @default([])
+  status          TruckStatus @default(AVAILABLE)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  owner            User       @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  bookings         Booking[]
+
+  @@index([ownerId])
+  @@index([status])
+  @@index([truckType])
+  @@index([currentLocation])
+}
+
+model Booking {
+  id                   String        @id @default(uuid())
+  truckId              String
+  importerId           String
+  cargoType            String
+  cargoDescription     String?
+  cargoWeight          Float
+  pickupLocation       String
+  destination          String
+  pickupDate           DateTime
+  expectedDeliveryDate DateTime
+  status               BookingStatus @default(PENDING)
+  additionalInstructions String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  truck                Truck         @relation(fields: [truckId], references: [id], onDelete: Restrict)
+  importer             User          @relation(fields: [importerId], references: [id], onDelete: Restrict)
+  dispute              Dispute?
+
+  @@index([truckId])
+  @@index([importerId])
+  @@index([status])
+  @@index([pickupDate])
+}
+
+model Dispute {
+  id             String        @id @default(uuid())
+  bookingId      String        @unique
+  raisedBy       String
+  reason         String
+  status         DisputeStatus @default(OPEN)
+  resolutionNotes String?
+  createdAt      DateTime      @default(now())
+  resolvedAt     DateTime?
+
+  booking        Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  raiser         User          @relation("RaisedDisputes", fields: [raisedBy], references: [id], onDelete: Restrict)
+
+  @@index([raisedBy])
+  @@index([status])
+}
