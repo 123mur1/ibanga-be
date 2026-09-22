@@ -14,6 +14,8 @@ const userSelect = {
   phone: true,
   role: true,
   location: true,
+  company: true,
+  photo: true,
   createdAt: true,
 } as const;
 

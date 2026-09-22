@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { BookingStatus, Prisma, TruckStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
@@ -54,6 +55,7 @@ export class BookingsService {
 
     // One atomic statement claims the truck and inserts the booking. It does
     // not need an interactive transaction, which Neon poolers can drop.
+    const bookingId = randomUUID();
     const created = await this.prisma.$queryRaw<{ id: string }[]>`
       WITH claimed_truck AS (
         UPDATE "Truck"
@@ -63,14 +65,14 @@ export class BookingsService {
         RETURNING "id"
       )
       INSERT INTO "Booking" (
-        "truckId", "importerId", "cargoType", "cargoDescription",
+        "id", "truckId", "importerId", "cargoType", "cargoDescription",
         "cargoWeight", "pickupLocation", "destination", "pickupDate",
-        "expectedDeliveryDate", "additionalInstructions"
+        "expectedDeliveryDate", "additionalInstructions", "updatedAt"
       )
       SELECT
-        "id", ${actor.id}, ${dto.cargoType}, ${dto.cargoDescription ?? null},
+        ${bookingId}, "id", ${actor.id}, ${dto.cargoType}, ${dto.cargoDescription ?? null},
         ${dto.cargoWeight}, ${dto.pickupLocation}, ${dto.destination}, ${pickupDate},
-        ${expectedDeliveryDate}, ${dto.additionalInstructions ?? null}
+        ${expectedDeliveryDate}, ${dto.additionalInstructions ?? null}, NOW()
       FROM claimed_truck
       RETURNING "id"
     `;

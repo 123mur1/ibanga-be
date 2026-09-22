@@ -10,6 +10,7 @@ import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 
 const PUBLIC_USER = {
   id: true,
@@ -18,6 +19,8 @@ const PUBLIC_USER = {
   phone: true,
   role: true,
   location: true,
+  company: true,
+  photo: true,
 } as const;
 
 @Injectable()
@@ -29,7 +32,9 @@ export class AuthService {
 
   async register(dto: RegisterDto) {
     if (dto.role === UserRole.ADMIN) {
-      throw new BadRequestException('Admin accounts cannot be self-registered.');
+      throw new BadRequestException(
+        'Admin accounts cannot be self-registered.',
+      );
     }
 
     const existing = await this.prisma.user.findUnique({
@@ -75,6 +80,8 @@ export class AuthService {
       phone: user.phone,
       role: user.role,
       location: user.location,
+      company: user.company,
+      photo: user.photo,
     };
 
     return this.withToken(publicUser);
@@ -91,6 +98,22 @@ export class AuthService {
     return user;
   }
 
+  async updateProfile(userId: string, dto: UpdateProfileDto) {
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        ...(dto.name === undefined ? {} : { name: dto.name.trim() }),
+        ...(dto.phone === undefined ? {} : { phone: dto.phone.trim() }),
+        ...(dto.location === undefined
+          ? {}
+          : { location: dto.location.trim() }),
+        ...(dto.company === undefined ? {} : { company: dto.company.trim() }),
+        ...(dto.photo === undefined ? {} : { photo: dto.photo }),
+      },
+      select: PUBLIC_USER,
+    });
+  }
+
   private withToken(user: {
     id: string;
     name: string;
@@ -98,6 +121,8 @@ export class AuthService {
     phone: string | null;
     role: User['role'];
     location: string | null;
+    company: string | null;
+    photo: string | null;
   }) {
     const token = this.jwt.sign({
       sub: user.id,

@@ -15,6 +15,7 @@ const OWNER_SELECT = {
   email: true,
   phone: true,
   location: true,
+  photo: true,
 } as const;
 
 const TRUCK_INCLUDE = { owner: { select: OWNER_SELECT } } as const;

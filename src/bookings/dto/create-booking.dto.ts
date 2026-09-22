@@ -24,7 +24,7 @@ export class CreateBookingDto {
   @MaxLength(2000)
   cargoDescription?: string;
 
-  @Transform(({ value }) =>
+  @Transform(({ value }: { value: unknown }) =>
     typeof value === 'string' ? Number.parseFloat(value) : value,
   )
   @IsNumber()
