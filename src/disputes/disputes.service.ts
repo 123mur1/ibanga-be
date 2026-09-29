@@ -8,7 +8,6 @@ import {
   BookingStatus,
   DisputeStatus,
   Prisma,
-  TruckStatus,
   UserRole,
 } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
@@ -84,14 +83,6 @@ export class DisputesService {
     if (!dispute) throw new NotFoundException('Dispute not found.');
     if (dispute.status === DisputeStatus.RESOLVED)
       throw new BadRequestException('This dispute is already resolved.');
-    await this.prisma.booking.update({
-      where: { id: dispute.bookingId },
-      data: { status: BookingStatus.COMPLETED },
-    });
-    await this.prisma.truck.update({
-      where: { id: dispute.booking.truckId },
-      data: { status: TruckStatus.AVAILABLE },
-    });
     return this.prisma.dispute.update({
       where: { id },
       data: {

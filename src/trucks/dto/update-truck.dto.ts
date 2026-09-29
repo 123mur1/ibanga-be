@@ -1,11 +1,14 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsInt,
   IsNumber,
   IsOptional,
   IsPositive,
   IsString,
   MaxLength,
+  Max,
+  Min,
   MinLength,
 } from 'class-validator';
 
@@ -28,6 +31,12 @@ export class UpdateTruckDto {
   @IsNumber()
   @IsPositive()
   capacity?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(1000000000)
+  priceRwf?: number;
 
   @IsOptional()
   @IsString()
