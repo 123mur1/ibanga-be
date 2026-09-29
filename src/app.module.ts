@@ -8,6 +8,7 @@ import { UsersModule } from './users/users.module';
 import { DemoModule } from './demo/demo.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { DisputesModule } from './disputes/disputes.module';
+import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { DisputesModule } from './disputes/disputes.module';
     DemoModule,
     BookingsModule,
     DisputesModule,
+    PaymentsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

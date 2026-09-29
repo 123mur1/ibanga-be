@@ -31,6 +31,45 @@
 $ npm install
 ```
 
+## In-app payments
+
+Local development uses simulated payments when `NODE_ENV` is not `production`
+and `FLW_SECRET_KEY` is absent. You can also set `PAYMENTS_MODE=mock` to force
+simulation locally. These deposits and withdrawals only change test balances;
+no real money is charged or sent. The wallet page labels this mode clearly.
+
+Payments use Flutterwave's Rwanda APIs for RWF deposits by mobile money and
+withdrawals to MTN Mobile Money or Rwandan bank accounts. Complete Flutterwave
+business verification, enable RWF collections and API transfers, and use a
+production-approved merchant account before enabling live payments.
+
+Set `PAYMENTS_MODE=flutterwave` and real Flutterwave credentials in the deployed
+backend environment. Production never enables mock mode.
+
+Configure `FLW_SECRET_KEY`, `FLW_WEBHOOK_SECRET`, `FRONTEND_URL`, and
+`PAYMENT_COMMISSION_BPS` in the backend environment. The commission defaults to
+`600` basis points (6%) and is deducted from the truck owner's agreed price.
+Register `POST /payments/webhooks/flutterwave` in the Flutterwave dashboard and
+set its webhook secret to the same value as `FLW_WEBHOOK_SECRET`. Do not expose
+the secret key in the frontend.
+
+After configuring `DATABASE_URL`, apply the Prisma schema and regenerate the
+client:
+
+```bash
+npm run prisma:push
+npm run prisma:generate
+```
+
+Booking funds are held in the platform's Flutterwave merchant balance and
+accounted for by the app ledger until importer confirmation. Every new truck
+listing requires a whole-number RWF price; each booking snapshots that listing
+price. Owners cannot change the price per booking or start a trip before the
+importer payment is held. Dispute resolution alone does not release funds or
+unlock the truck; the importer must still confirm receipt. This implementation
+does not establish regulated escrow or a separately licensed stored-value
+wallet; obtain the required local legal and provider approvals before launch.
+
 ## Compile and run the project
 
 ```bash

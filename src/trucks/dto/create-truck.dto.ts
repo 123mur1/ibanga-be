@@ -1,9 +1,12 @@
 import {
   ArrayMaxSize,
   IsArray,
+  IsInt,
   IsNumber,
   IsOptional,
   IsPositive,
+  Max,
+  Min,
   IsString,
   MaxLength,
   MinLength,
@@ -25,6 +28,11 @@ export class CreateTruckDto {
   @IsNumber()
   @IsPositive()
   capacity: number;
+
+  @IsInt()
+  @Min(1)
+  @Max(1000000000)
+  priceRwf: number;
 
   @IsOptional()
   @IsString()

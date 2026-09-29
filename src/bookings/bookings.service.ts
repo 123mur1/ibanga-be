@@ -7,6 +7,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { BookingStatus, Prisma, TruckStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
 
@@ -28,11 +29,16 @@ const BOOKING_INCLUDE = {
   importer: {
     select: { id: true, name: true, email: true, phone: true, location: true },
   },
+  payment: true,
+  dispute: true,
 } satisfies Prisma.BookingInclude;
 
 @Injectable()
 export class BookingsService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private payments: PaymentsService,
+  ) {}
 
   async create(actor: Actor, dto: CreateBookingDto) {
     if (actor.role !== UserRole.IMPORTER)
@@ -48,6 +54,11 @@ export class BookingsService {
     if (!truck) throw new NotFoundException('Truck not found.');
     if (truck.status !== TruckStatus.AVAILABLE)
       throw new BadRequestException('This truck is not available to book.');
+    if (truck.priceRwf === null) {
+      throw new BadRequestException(
+        'This truck has no price and cannot be booked. Ask the owner to update its RWF price.',
+      );
+    }
     if (dto.cargoWeight > truck.capacity)
       throw new BadRequestException(
         'Cargo weight exceeds this truck capacity.',
@@ -67,12 +78,14 @@ export class BookingsService {
       INSERT INTO "Booking" (
         "id", "truckId", "importerId", "cargoType", "cargoDescription",
         "cargoWeight", "pickupLocation", "destination", "pickupDate",
-        "expectedDeliveryDate", "additionalInstructions", "updatedAt"
+        "expectedDeliveryDate", "additionalInstructions", "agreedPrice",
+        "agreedPriceRwf", "updatedAt"
       )
       SELECT
         ${bookingId}, "id", ${actor.id}, ${dto.cargoType}, ${dto.cargoDescription ?? null},
         ${dto.cargoWeight}, ${dto.pickupLocation}, ${dto.destination}, ${pickupDate},
-        ${expectedDeliveryDate}, ${dto.additionalInstructions ?? null}, NOW()
+        ${expectedDeliveryDate}, ${dto.additionalInstructions ?? null},
+        ${`RWF ${truck.priceRwf.toLocaleString('en-RW')}`}, ${truck.priceRwf}, NOW()
       FROM claimed_truck
       RETURNING "id"
     `;
@@ -112,37 +125,54 @@ export class BookingsService {
   }
 
   async update(actor: Actor, id: string, dto: UpdateBookingDto) {
-    if (!dto.status && dto.agreedPrice === undefined)
-      throw new BadRequestException('Provide a status or agreed price.');
+    if (!dto.status)
+      throw new BadRequestException('Provide a booking status.');
     const booking = await this.findOne(actor, id);
     const isOwner = booking.truck.ownerId === actor.id;
     const isImporter = booking.importerId === actor.id;
-    if (
-      dto.agreedPrice !== undefined &&
-      (!isOwner || booking.status !== BookingStatus.PENDING)
-    ) {
-      throw new ForbiddenException(
-        'Only the truck owner can set the price on a pending booking.',
-      );
+    const disputeResolved = booking.dispute?.status === 'RESOLVED';
+    this.assertStatusChange(
+      actor,
+      booking.status,
+      dto.status,
+      isOwner,
+      isImporter,
+      booking.agreedPriceRwf,
+      disputeResolved,
+    );
+
+    if (dto.status === BookingStatus.IN_PROGRESS) {
+      const payment = await this.prisma.bookingPayment.findUnique({
+        where: { bookingId: id },
+      });
+      if (payment?.status !== 'FUNDED') {
+        throw new BadRequestException(
+          'The importer must pay the agreed price before the trip starts.',
+        );
+      }
     }
-    if (dto.status)
-      this.assertStatusChange(
-        actor,
-        booking.status,
-        dto.status,
-        isOwner,
-        isImporter,
-        booking.agreedPrice,
-        dto.agreedPrice,
-      );
+
+    if (dto.status === BookingStatus.COMPLETED) {
+      if (!isImporter) {
+        throw new ForbiddenException(
+          'Only the importer can confirm delivery and release the held payment.',
+        );
+      }
+      const payment = await this.prisma.bookingPayment.findUnique({
+        where: { bookingId: id },
+      });
+      if (payment?.status !== 'FUNDED') {
+        throw new BadRequestException(
+          'The booking has no held payment to release.',
+        );
+      }
+      await this.payments.releaseBookingFunds(id);
+    }
 
     const updated = await this.prisma.booking.update({
       where: { id },
       data: {
-        ...(dto.agreedPrice !== undefined
-          ? { agreedPrice: dto.agreedPrice.trim() }
-          : {}),
-        ...(dto.status ? { status: dto.status } : {}),
+        status: dto.status,
       },
       include: BOOKING_INCLUDE,
     });
@@ -177,8 +207,8 @@ export class BookingsService {
     next: BookingStatus,
     isOwner: boolean,
     isImporter: boolean,
-    agreedPrice: string,
-    nextPrice?: string,
+    agreedPriceRwf: number | null,
+    disputeResolved: boolean,
   ) {
     if (actor.role === UserRole.ADMIN) return;
     const ownerTransitions: Partial<Record<BookingStatus, BookingStatus[]>> = {
@@ -188,16 +218,21 @@ export class BookingsService {
     };
     const allowed = isOwner
       ? ownerTransitions[current]
-      : isImporter && current === BookingStatus.DELIVERED
+      : isImporter &&
+          (current === BookingStatus.DELIVERED ||
+            (current === BookingStatus.DISPUTED && disputeResolved))
         ? [BookingStatus.COMPLETED]
         : [];
     if (!allowed?.includes(next))
       throw new ForbiddenException(
         'That booking status change is not allowed.',
       );
-    if (next === BookingStatus.ACCEPTED && !(nextPrice ?? agreedPrice).trim())
+    if (
+      next === BookingStatus.ACCEPTED &&
+      !agreedPriceRwf
+    )
       throw new BadRequestException(
-        'Agree a price before accepting this booking.',
+        'This truck has no agreed RWF price and cannot be accepted.',
       );
   }
 }

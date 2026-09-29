@@ -42,6 +42,7 @@ const DEMO_TRUCKS = [
     plateNumber: 'RAD 452 C',
     truckType: 'Container',
     capacity: 28,
+    priceRwf: 850000,
     currentLocation: 'Kigali',
     preferredRoute: 'Kigali — Mombasa',
     description:
@@ -57,6 +58,7 @@ const DEMO_TRUCKS = [
     plateNumber: 'RAD 118 B',
     truckType: 'Refrigerated',
     capacity: 18,
+    priceRwf: 1100000,
     currentLocation: 'Musanze',
     preferredRoute: 'Kigali — Kampala',
     description:
@@ -69,6 +71,7 @@ const DEMO_TRUCKS = [
     plateNumber: 'KCD 903 A',
     truckType: 'Flatbed',
     capacity: 30,
+    priceRwf: 720000,
     currentLocation: 'Mombasa',
     preferredRoute: 'Mombasa — Kigali',
     description:
@@ -81,6 +84,7 @@ const DEMO_TRUCKS = [
     plateNumber: 'KCA 220 T',
     truckType: 'Tanker',
     capacity: 32,
+    priceRwf: 980000,
     currentLocation: 'Nairobi',
     preferredRoute: 'Nairobi — Kigali',
     description: 'Fuel and liquid cargo tanker. Certified hoses and valves.',
@@ -92,6 +96,7 @@ const DEMO_TRUCKS = [
     plateNumber: 'RAE 671 D',
     truckType: 'Box truck',
     capacity: 8,
+    priceRwf: 220000,
     currentLocation: 'Kigali',
     preferredRoute: 'Kigali — Rusumo',
     description:
@@ -104,6 +109,7 @@ const DEMO_TRUCKS = [
     plateNumber: 'KBB 441 M',
     truckType: 'Semi-trailer',
     capacity: 34,
+    priceRwf: 1250000,
     currentLocation: 'Dar es Salaam',
     preferredRoute: 'Dar es Salaam — Kigali',
     description: 'Long-haul semi for containerized imports from the port.',
