@@ -13,6 +13,7 @@ import {
   WalletTransactionDirection,
   WalletTransactionStatus,
   WalletTransactionType,
+  UserRole,
 } from '@prisma/client';
 import { timingSafeEqual, randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
@@ -85,14 +86,15 @@ export class PaymentsService {
   }
 
   async createDeposit(userId: string, dto: CreateDepositDto) {
-    const [wallet, user] = await Promise.all([
-      this.getOrCreateWallet(userId),
-      this.prisma.user.findUnique({
-        where: { id: userId },
-        select: { name: true, email: true },
-      }),
-    ]);
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { name: true, email: true, role: true },
+    });
     if (!user) throw new NotFoundException('User not found.');
+    if (user.role !== UserRole.IMPORTER) {
+      throw new ForbiddenException('Only importers can deposit funds.');
+    }
+    const wallet = await this.getOrCreateWallet(userId);
     const phoneNumber = this.normalizeRwandaPhone(dto.phoneNumber);
 
     const reference = `ibanga-deposit-${randomUUID()}`;
