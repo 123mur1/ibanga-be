@@ -59,7 +59,9 @@ export class TrucksService {
 
     return this.prisma.truck.findMany({
       where: {
-        status: TruckStatus.AVAILABLE,
+        ...(userRole === UserRole.ADMIN
+          ? {}
+          : { status: TruckStatus.AVAILABLE }),
         ...(query.location
           ? { currentLocation: { equals: query.location, mode: 'insensitive' } }
           : {}),
