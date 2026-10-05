@@ -55,27 +55,14 @@ likely intercepting TLS. Export that network or antivirus root certificate as
 PEM and set `SMTP_TLS_CA_PATH` to its file path. The mailer keeps certificate
 verification enabled; do not disable TLS verification to work around this error.
 
-## In-app payments
+## Simulated payments
 
-Local development uses simulated payments when `NODE_ENV` is not `production`
-and `FLW_SECRET_KEY` is absent. You can also set `PAYMENTS_MODE=mock` to force
-simulation locally. These deposits and withdrawals only change test balances;
-no real money is charged or sent. The wallet page labels this mode clearly.
-
-Payments use Flutterwave's Rwanda APIs for RWF deposits by mobile money and
-withdrawals to MTN Mobile Money or Rwandan bank accounts. Complete Flutterwave
-business verification, enable RWF collections and API transfers, and use a
-production-approved merchant account before enabling live payments.
-
-Set `PAYMENTS_MODE=flutterwave` and real Flutterwave credentials in the deployed
-backend environment. Production never enables mock mode.
-
-Configure `FLW_SECRET_KEY`, `FLW_WEBHOOK_SECRET`, `FRONTEND_URL`, and
-`PAYMENT_COMMISSION_BPS` in the backend environment. The commission defaults to
-`600` basis points (6%) and is deducted from the truck owner's agreed price.
-Register `POST /payments/webhooks/flutterwave` in the Flutterwave dashboard and
-set its webhook secret to the same value as `FLW_WEBHOOK_SECRET`. Do not expose
-the secret key in the frontend.
+All deposits, withdrawals, and booking payments use the app's simulated wallet
+ledger in every environment. No payment provider is contacted, no real money is
+charged or transferred, and balances have no monetary value. Deposits are
+credited to the test wallet, withdrawals update test records only, and booking
+funds move between internal test balances. Do not use these balances as escrow
+or for real transactions.
 
 After configuring `DATABASE_URL`, apply the Prisma schema and regenerate the
 client:
@@ -85,14 +72,11 @@ npm run prisma:push
 npm run prisma:generate
 ```
 
-Booking funds are held in the platform's Flutterwave merchant balance and
-accounted for by the app ledger until importer confirmation. Every new truck
-listing requires a whole-number RWF price; each booking snapshots that listing
-price. Owners cannot change the price per booking or start a trip before the
-importer payment is held. Dispute resolution alone does not release funds or
-unlock the truck; the importer must still confirm receipt. This implementation
-does not establish regulated escrow or a separately licensed stored-value
-wallet; obtain the required local legal and provider approvals before launch.
+Every new truck listing requires a whole-number RWF price; each booking
+snapshots that listing price. Owners cannot change the price per booking or
+start a trip before the importer records the simulated booking payment. Dispute
+resolution alone does not release the simulated funds or unlock the truck; the
+importer must still confirm receipt.
 
 ## Compile and run the project
 

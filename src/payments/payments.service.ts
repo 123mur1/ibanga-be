@@ -1,5 +1,4 @@
 import {
-  BadGatewayException,
   BadRequestException,
   ForbiddenException,
   Injectable,
@@ -15,38 +14,9 @@ import {
   WalletTransactionType,
   UserRole,
 } from '@prisma/client';
-import { timingSafeEqual, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDepositDto, CreateWithdrawalDto, WalletActor } from './wallet.dto';
-
-type FlwEnvelope<T> = {
-  status: string;
-  message?: string;
-  data: T;
-  meta?: { authorization?: { redirect?: string } };
-};
-
-type ChargeData = { id: number | string; status?: string };
-type VerifiedCharge = {
-  id: number | string;
-  tx_ref: string;
-  status: string;
-  amount: number;
-  currency: string;
-};
-type TransferData = {
-  id: number | string;
-  status: string;
-  reference: string;
-};
-type WebhookPayload = {
-  event?: string;
-  data?: {
-    id?: number | string;
-    tx_ref?: string;
-    reference?: string;
-  };
-};
 
 @Injectable()
 export class PaymentsService {
@@ -62,40 +32,30 @@ export class PaymentsService {
     return {
       balanceRwf: wallet.balanceRwf,
       currency: 'RWF',
-      mode: this.isMockMode() ? 'mock' : 'flutterwave',
+      mode: 'mock',
       transactions,
     };
   }
 
   async getRwandaBanks() {
-    if (this.isMockMode()) {
-      return [{ id: 'MOCK_BANK', code: 'MOCK_BANK', name: 'Local test bank' }];
-    }
-    const response = await this.flwRequest<unknown[]>('/banks/RW');
-    return response.data;
+    return [{ id: 'MOCK_BANK', code: 'MOCK_BANK', name: 'Simulation bank' }];
   }
 
   async getRwandaBankBranches(bankCode: string) {
-    if (this.isMockMode()) {
-      return [{ id: 'MOCK_BRANCH', code: 'MOCK_BRANCH', name: 'Local test branch' }];
-    }
-    const response = await this.flwRequest<unknown[]>(
-      `/banks/${encodeURIComponent(bankCode)}/branches`,
-    );
-    return response.data;
+    return [{ id: 'MOCK_BRANCH', code: 'MOCK_BRANCH', name: 'Simulation branch' }];
   }
 
   async createDeposit(userId: string, dto: CreateDepositDto) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
-      select: { name: true, email: true, role: true },
+      select: { role: true },
     });
     if (!user) throw new NotFoundException('User not found.');
     if (user.role !== UserRole.IMPORTER) {
       throw new ForbiddenException('Only importers can deposit funds.');
     }
     const wallet = await this.getOrCreateWallet(userId);
-    const phoneNumber = this.normalizeRwandaPhone(dto.phoneNumber);
+    this.normalizeRwandaPhone(dto.phoneNumber);
 
     const reference = `ibanga-deposit-${randomUUID()}`;
     await this.prisma.walletTransaction.create({
@@ -110,46 +70,22 @@ export class PaymentsService {
       },
     });
 
-    if (this.isMockMode()) {
-      await this.prisma.$queryRaw`
-        WITH credited AS (
-          UPDATE "WalletTransaction"
-          SET "status" = CAST(${WalletTransactionStatus.SUCCEEDED} AS "WalletTransactionStatus"),
-              "description" = 'Local test deposit (simulated)', "updatedAt" = NOW()
-          WHERE "reference" = ${reference}
-            AND "status" = CAST(${WalletTransactionStatus.PENDING} AS "WalletTransactionStatus")
-          RETURNING "walletId", "amountRwf"
-        )
-        UPDATE "Wallet" wallet
-        SET "balanceRwf" = wallet."balanceRwf" + credited."amountRwf",
-            "updatedAt" = NOW()
-        FROM credited
-        WHERE wallet."id" = credited."walletId"
-      `;
-      return { simulated: true, message: 'Local test deposit added to wallet.' };
-    }
-
-    const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:3000';
-    const response = await this.flwRequest<ChargeData>(
-      '/charges?type=mobile_money_rwanda',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          phone_number: phoneNumber,
-          amount: dto.amountRwf,
-          currency: 'RWF',
-          email: user.email,
-          fullname: user.name,
-          tx_ref: reference,
-          redirect_url: `${frontendUrl}/dashboard/wallet?deposit=${encodeURIComponent(reference)}`,
-        }),
-      },
-    );
-    const paymentUrl = response.meta?.authorization?.redirect;
-    if (!paymentUrl) {
-      throw new BadGatewayException('The provider did not return a payment link.');
-    }
-    return { reference, paymentUrl };
+    await this.prisma.$queryRaw`
+      WITH credited AS (
+        UPDATE "WalletTransaction"
+        SET "status" = CAST(${WalletTransactionStatus.SUCCEEDED} AS "WalletTransactionStatus"),
+            "description" = 'Simulated wallet deposit', "updatedAt" = NOW()
+        WHERE "reference" = ${reference}
+          AND "status" = CAST(${WalletTransactionStatus.PENDING} AS "WalletTransactionStatus")
+        RETURNING "walletId", "amountRwf"
+      )
+      UPDATE "Wallet" wallet
+      SET "balanceRwf" = wallet."balanceRwf" + credited."amountRwf",
+          "updatedAt" = NOW()
+      FROM credited
+      WHERE wallet."id" = credited."walletId"
+    `;
+    return { simulated: true, message: 'Simulated deposit added to wallet.' };
   }
 
   async createWithdrawal(userId: string, dto: CreateWithdrawalDto) {
@@ -160,7 +96,6 @@ export class PaymentsService {
     });
     if (!user) throw new NotFoundException('User not found.');
 
-    const transferDetails = this.toTransferDetails(dto);
     const reference = `ibanga-withdrawal-${randomUUID()}`;
     const transactionId = randomUUID();
     const reserved = await this.prisma.$queryRaw<{ id: string }[]>`
@@ -187,40 +122,12 @@ export class PaymentsService {
       throw new BadRequestException('Wallet balance is too low for this withdrawal.');
     }
 
-    if (this.isMockMode()) {
-      await this.prisma.walletTransaction.update({
-        where: { reference },
-        data: {
-          status: WalletTransactionStatus.SUCCEEDED,
-          providerReference: `MOCK-${reference}`,
-          description: 'Local test withdrawal (simulated; no money sent)',
-        },
-      });
-      return this.prisma.walletTransaction.findUniqueOrThrow({ where: { reference } });
-    }
-
-    const response = await this.flwRequest<TransferData>('/transfers', {
-      method: 'POST',
-      body: JSON.stringify({
-        ...transferDetails,
-        amount: dto.amountRwf,
-        currency: 'RWF',
-        debit_currency: 'RWF',
-        reference,
-        narration: 'iBanga wallet withdrawal',
-      }),
-    });
-    if (response.data.status === 'FAILED') {
-      await this.failWithdrawal(reference);
-      throw new BadGatewayException('The payment provider rejected the withdrawal.');
-    }
     await this.prisma.walletTransaction.update({
       where: { reference },
       data: {
-        providerReference: String(response.data.id),
-        ...(response.data.status === 'SUCCESSFUL'
-          ? { status: WalletTransactionStatus.SUCCEEDED }
-          : {}),
+        status: WalletTransactionStatus.SUCCEEDED,
+        providerReference: `SIM-${reference}`,
+        description: 'Simulated withdrawal; no money sent',
       },
     });
     return this.prisma.walletTransaction.findUniqueOrThrow({
@@ -430,183 +337,12 @@ export class PaymentsService {
     };
   }
 
-  private isMockMode() {
-    if (process.env.NODE_ENV === 'production') return false;
-    if (process.env.PAYMENTS_MODE === 'flutterwave') return false;
-    if (process.env.PAYMENTS_MODE === 'mock') return true;
-    return !process.env.FLW_SECRET_KEY;
-  }
-
-  async handleFlutterwaveWebhook(
-    signature: string | undefined,
-    payload: WebhookPayload,
-  ) {
-    this.assertWebhookSignature(signature);
-    const data = payload?.data;
-    if (!data?.id) return { received: true };
-
-    if (payload.event === 'charge.completed' && data.tx_ref) {
-      const transaction = await this.prisma.walletTransaction.findUnique({
-        where: { reference: data.tx_ref },
-      });
-      if (!transaction || transaction.type !== WalletTransactionType.DEPOSIT) {
-        return { received: true };
-      }
-      if (transaction.status !== WalletTransactionStatus.PENDING) {
-        return { received: true };
-      }
-
-      const verified = await this.flwRequest<VerifiedCharge>(
-        `/transactions/${encodeURIComponent(String(data.id))}/verify`,
-      );
-      const charge = verified.data;
-      if (
-        charge.tx_ref !== transaction.reference ||
-        charge.currency !== 'RWF' ||
-        charge.amount !== transaction.amountRwf
-      ) {
-        throw new BadRequestException('Payment verification did not match the deposit.');
-      }
-      if (charge.status !== 'successful') {
-        await this.prisma.walletTransaction.updateMany({
-          where: {
-            id: transaction.id,
-            status: WalletTransactionStatus.PENDING,
-          },
-          data: {
-            status: WalletTransactionStatus.FAILED,
-            providerReference: String(charge.id),
-          },
-        });
-        return { received: true };
-      }
-
-      await this.prisma.$queryRaw`
-        WITH credited AS (
-          UPDATE "WalletTransaction"
-          SET "status" = CAST(${WalletTransactionStatus.SUCCEEDED} AS "WalletTransactionStatus"),
-              "providerReference" = ${String(charge.id)}, "updatedAt" = NOW()
-          WHERE "id" = ${transaction.id}
-            AND "status" = CAST(${WalletTransactionStatus.PENDING} AS "WalletTransactionStatus")
-          RETURNING "walletId", "amountRwf"
-        )
-        UPDATE "Wallet" wallet
-        SET "balanceRwf" = wallet."balanceRwf" + credited."amountRwf",
-            "updatedAt" = NOW()
-        FROM credited
-        WHERE wallet."id" = credited."walletId"
-      `;
-      return { received: true };
-    }
-
-    if (payload.event === 'transfer.completed' && data.reference) {
-      const transaction = await this.prisma.walletTransaction.findUnique({
-        where: { reference: data.reference },
-      });
-      if (!transaction || transaction.type !== WalletTransactionType.WITHDRAWAL) {
-        return { received: true };
-      }
-      if (transaction.status !== WalletTransactionStatus.PENDING) {
-        return { received: true };
-      }
-
-      const verified = await this.flwRequest<TransferData>(
-        `/transfers/${encodeURIComponent(String(data.id))}`,
-      );
-      if (verified.data.reference !== transaction.reference) {
-        throw new BadRequestException('Transfer verification did not match the withdrawal.');
-      }
-      if (verified.data.status === 'SUCCESSFUL') {
-        await this.prisma.walletTransaction.updateMany({
-          where: {
-            id: transaction.id,
-            status: WalletTransactionStatus.PENDING,
-          },
-          data: {
-            status: WalletTransactionStatus.SUCCEEDED,
-            providerReference: String(verified.data.id),
-          },
-        });
-      } else if (verified.data.status === 'FAILED') {
-        await this.failWithdrawal(transaction.reference, String(verified.data.id));
-      }
-    }
-    return { received: true };
-  }
-
   private async getOrCreateWallet(userId: string) {
     return this.prisma.wallet.upsert({
       where: { userId },
       create: { userId },
       update: {},
     });
-  }
-
-  private async failWithdrawal(reference: string, providerReference?: string) {
-    await this.prisma.$queryRaw`
-      WITH failed AS (
-        UPDATE "WalletTransaction"
-        SET "status" = CAST(${WalletTransactionStatus.FAILED} AS "WalletTransactionStatus"),
-            "providerReference" = COALESCE(${providerReference ?? null}, "providerReference"),
-            "updatedAt" = NOW()
-        WHERE "reference" = ${reference}
-          AND "type" = CAST(${WalletTransactionType.WITHDRAWAL} AS "WalletTransactionType")
-          AND "status" = CAST(${WalletTransactionStatus.PENDING} AS "WalletTransactionStatus")
-        RETURNING "walletId", "amountRwf"
-      )
-      UPDATE "Wallet" wallet
-      SET "balanceRwf" = wallet."balanceRwf" + failed."amountRwf",
-          "updatedAt" = NOW()
-      FROM failed
-      WHERE wallet."id" = failed."walletId"
-    `;
-  }
-
-  private async flwRequest<T>(
-    path: string,
-    options: RequestInit = {},
-  ): Promise<FlwEnvelope<T>> {
-    const secretKey = process.env.FLW_SECRET_KEY;
-    if (!secretKey) {
-      throw new ServiceUnavailableException(
-        'Flutterwave payments are not configured. Set FLW_SECRET_KEY in backend/.env and restart the API.',
-      );
-    }
-    let response: Response;
-    try {
-      response = await fetch(`https://api.flutterwave.com/v3${path}`, {
-        ...options,
-        headers: {
-          Authorization: `Bearer ${secretKey}`,
-          'Content-Type': 'application/json',
-          ...options.headers,
-        },
-      });
-    } catch {
-      throw new BadGatewayException('Could not reach the payment provider.');
-    }
-    const result = (await response.json().catch(() => null)) as
-      | FlwEnvelope<T>
-      | null;
-    if (!response.ok || !result || result.status !== 'success') {
-      throw new BadGatewayException('The payment provider could not process the request.');
-    }
-    return result;
-  }
-
-  private assertWebhookSignature(signature: string | undefined) {
-    const secret = process.env.FLW_WEBHOOK_SECRET;
-    if (!secret || !signature) {
-      throw new UnauthorizedException('Invalid payment webhook signature.');
-    }
-    const received = Buffer.from(signature);
-    const expected = Buffer.from(secret);
-    if (
-      received.length !== expected.length ||
-      !timingSafeEqual(received, expected)
-    ) {
-      throw new UnauthorizedException('Invalid payment webhook signature.');
-    }
   }
 
   private getCommissionBps() {
@@ -624,27 +360,4 @@ export class PaymentsService {
     throw new BadRequestException('Enter a valid Rwanda mobile number.');
   }
 
-  private toTransferDetails(dto: CreateWithdrawalDto) {
-    if (dto.method === 'MOBILE_MONEY') {
-      if (!dto.phoneNumber) {
-        throw new BadRequestException('An MTN Mobile Money number is required.');
-      }
-      return {
-        account_bank: 'MTN',
-        account_number: this.normalizeRwandaPhone(dto.phoneNumber),
-        beneficiary_name: dto.beneficiaryName.trim(),
-      };
-    }
-    if (!dto.bankCode || !dto.branchCode || !dto.accountNumber) {
-      throw new BadRequestException(
-        'Bank, branch, and account details are required for a bank withdrawal.',
-      );
-    }
-    return {
-      account_bank: dto.bankCode,
-      destination_branch_code: dto.branchCode,
-      account_number: dto.accountNumber.trim(),
-      beneficiary_name: dto.beneficiaryName.trim(),
-    };
-  }
 }
