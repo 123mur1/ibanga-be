@@ -31,6 +31,14 @@
 $ npm install
 ```
 
+## Deployment URLs
+
+The deployed frontend uses `https://ibanga-be-1.onrender.com` as its production
+API by default. Set `NEXT_PUBLIC_API_URL` in Vercel to that URL to override it.
+In Render, set `FRONTEND_URL` to `https://ibanga-fe-1fkh.vercel.app`; add any
+additional allowed frontend origins as a comma-separated `CORS_ORIGINS` value.
+Redeploy both services after changing their environment variables.
+
 ## Password reset email
 
 Password-reset links are sent through Gmail SMTP. Configure `SMTP_HOST`,

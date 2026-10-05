@@ -4,10 +4,22 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 
+const allowedOrigins = new Set(
+  [
+    'http://localhost:3000',
+    'https://ibanga-fe-1fkh.vercel.app',
+    process.env.FRONTEND_URL,
+    ...(process.env.CORS_ORIGINS ?? '').split(','),
+  ]
+    .filter((origin): origin is string => Boolean(origin))
+    .map((origin) => origin.trim()),
+);
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   app.enableCors({
-    origin: ['http://localhost:3000'],
+    origin: (origin, callback) =>
+      callback(null, !origin || allowedOrigins.has(origin)),
     credentials: true,
   });
   const server = app.getHttpAdapter().getInstance() as Express;
