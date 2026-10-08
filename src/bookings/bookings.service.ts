@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PaymentsService } from '../payments/payments.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
+import { UpdateTrackingLocationDto } from './dto/update-tracking-location.dto';
 
 type Actor = { id: string; role: UserRole };
 const BOOKING_INCLUDE = {
@@ -124,9 +125,85 @@ export class BookingsService {
     return booking;
   }
 
+  async getTrackingLocation(actor: Actor, id: string) {
+    const booking = await this.findOne(actor, id);
+    if (
+      booking.status !== BookingStatus.IN_PROGRESS ||
+      booking.trackingLatitude === null ||
+      booking.trackingLongitude === null ||
+      booking.trackingUpdatedAt === null
+    ) {
+      return null;
+    }
+    return {
+      latitude: booking.trackingLatitude,
+      longitude: booking.trackingLongitude,
+      accuracy: booking.trackingAccuracy,
+      updatedAt: booking.trackingUpdatedAt,
+    };
+  }
+
+  async updateTrackingLocation(
+    actor: Actor,
+    id: string,
+    dto: UpdateTrackingLocationDto,
+  ) {
+    const booking = await this.findOne(actor, id);
+    if (
+      actor.role !== UserRole.TRUCK_OWNER ||
+      booking.truck.ownerId !== actor.id
+    ) {
+      throw new ForbiddenException(
+        'Only this booking’s truck owner can share its location.',
+      );
+    }
+    if (booking.status !== BookingStatus.IN_PROGRESS) {
+      throw new BadRequestException(
+        'Location sharing is available only during an active trip.',
+      );
+    }
+
+    const updated = await this.prisma.booking.updateMany({
+      where: { id, status: BookingStatus.IN_PROGRESS },
+      data: {
+        trackingLatitude: dto.latitude,
+        trackingLongitude: dto.longitude,
+        trackingAccuracy: dto.accuracy,
+        trackingUpdatedAt: new Date(),
+      },
+    });
+    if (updated.count !== 1) {
+      throw new BadRequestException(
+        'Location sharing is available only during an active trip.',
+      );
+    }
+    return this.getTrackingLocation(actor, id);
+  }
+
+  async clearTrackingLocation(actor: Actor, id: string) {
+    const booking = await this.findOne(actor, id);
+    if (
+      actor.role !== UserRole.TRUCK_OWNER ||
+      booking.truck.ownerId !== actor.id
+    ) {
+      throw new ForbiddenException(
+        'Only this booking’s truck owner can stop location sharing.',
+      );
+    }
+    await this.prisma.booking.update({
+      where: { id },
+      data: {
+        trackingLatitude: null,
+        trackingLongitude: null,
+        trackingAccuracy: null,
+        trackingUpdatedAt: null,
+      },
+    });
+    return { cleared: true };
+  }
+
   async update(actor: Actor, id: string, dto: UpdateBookingDto) {
-    if (!dto.status)
-      throw new BadRequestException('Provide a booking status.');
+    if (!dto.status) throw new BadRequestException('Provide a booking status.');
     const booking = await this.findOne(actor, id);
     const isOwner = booking.truck.ownerId === actor.id;
     const isImporter = booking.importerId === actor.id;
@@ -173,6 +250,14 @@ export class BookingsService {
       where: { id },
       data: {
         status: dto.status,
+        ...(dto.status === BookingStatus.IN_PROGRESS
+          ? {}
+          : {
+              trackingLatitude: null,
+              trackingLongitude: null,
+              trackingAccuracy: null,
+              trackingUpdatedAt: null,
+            }),
       },
       include: BOOKING_INCLUDE,
     });
@@ -227,10 +312,7 @@ export class BookingsService {
       throw new ForbiddenException(
         'That booking status change is not allowed.',
       );
-    if (
-      next === BookingStatus.ACCEPTED &&
-      !agreedPriceRwf
-    )
+    if (next === BookingStatus.ACCEPTED && !agreedPriceRwf)
       throw new BadRequestException(
         'This truck has no agreed RWF price and cannot be accepted.',
       );

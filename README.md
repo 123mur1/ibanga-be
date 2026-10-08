@@ -72,6 +72,11 @@ npm run prisma:push
 npm run prisma:generate
 ```
 
+Live trip tracking stores only the truck's latest GPS position on its booking.
+The owner must explicitly start sharing from the active trip page; location
+updates stop when sharing is stopped or the trip leaves `IN_PROGRESS`. Apply
+the schema update with `npm run prisma:push` before deploying the tracking API.
+
 Every new truck listing requires a whole-number RWF price; each booking
 snapshots that listing price. Owners cannot change the price per booking or
 start a trip before the importer records the simulated booking payment. Dispute

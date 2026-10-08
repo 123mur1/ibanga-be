@@ -136,6 +136,10 @@ model Booking {
   additionalInstructions String?
   agreedPrice          String        @default("")
   agreedPriceRwf       Int?
+  trackingLatitude     Float?
+  trackingLongitude    Float?
+  trackingAccuracy     Float?
+  trackingUpdatedAt    DateTime?
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
