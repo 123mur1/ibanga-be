@@ -19,6 +19,7 @@ describe('EmailService', () => {
   });
 
   it('sends reset mail through the configured Gmail SMTP transport', async () => {
+    process.env.SMTP_PASS = 'abcd efgh ijkl mnop';
     const sendMail = jest.fn().mockResolvedValue({
       messageId: 'test-message',
       accepted: ['user@example.com'],
@@ -41,7 +42,7 @@ describe('EmailService', () => {
       requireTLS: false,
       auth: {
         user: 'sender@example.com',
-        pass: 'test-app-password',
+        pass: 'abcdefghijklmnop',
       },
       tls: { rejectUnauthorized: true },
     });

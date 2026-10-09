@@ -44,7 +44,8 @@ Redeploy both services after changing their environment variables.
 Password-reset links are sent through Gmail SMTP. Configure `SMTP_HOST`,
 `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, and
 `SMTP_FROM_NAME` in the backend environment. For Gmail, use an App Password
-with 2-Step Verification enabled, not your regular account password. Set
+with 2-Step Verification enabled, not your regular account password. The mailer
+removes spaces from a pasted Gmail App Password automatically. Set
 `FRONTEND_URL` to the public frontend origin so links return to the
 reset-password page. Reset links expire after one hour; the raw reset token is
 never returned by the API. Keep `SMTP_PASS` private and rotate it immediately

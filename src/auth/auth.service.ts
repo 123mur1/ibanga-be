@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   Logger,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -147,6 +148,9 @@ export class AuthService {
       this.logger.error(
         'Password reset email delivery failed.',
         error instanceof Error ? error.message : undefined,
+      );
+      throw new ServiceUnavailableException(
+        'Email delivery failed. Please try again later.',
       );
     }
 

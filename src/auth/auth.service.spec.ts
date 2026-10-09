@@ -56,15 +56,15 @@ describe('AuthService password reset', () => {
     expect(prisma.passwordResetToken.create).toHaveBeenCalled();
   });
 
-  it('removes the new token when SMTP rejects the email', async () => {
+  it('removes the new token and reports a delivery failure when SMTP rejects the email', async () => {
     prisma.user.findUnique.mockResolvedValue({ id: 'user-1', email: 'demo@example.com' });
     prisma.passwordResetToken.create.mockResolvedValue({ id: 'token-1', userId: 'user-1' });
     email.sendPasswordResetEmail.mockRejectedValue(new Error('SMTP rejected'));
     jest.spyOn((service as any).logger, 'error').mockImplementation();
 
-    const result = await service.requestPasswordReset('demo@example.com');
-
-    expect(result).not.toHaveProperty('resetToken');
+    await expect(
+      service.requestPasswordReset('demo@example.com'),
+    ).rejects.toThrow('Email delivery failed. Please try again later.');
     expect(prisma.passwordResetToken.deleteMany).toHaveBeenCalledWith({
       where: { tokenHash: expect.any(String) },
     });

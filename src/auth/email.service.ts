@@ -93,14 +93,19 @@ export class EmailService {
     const port = Number(process.env.SMTP_PORT);
     const secure =
       process.env.SMTP_SECURE?.toLowerCase() === 'true' || port === 465;
+    const smtpHost = process.env.SMTP_HOST!;
+    const smtpPassword = process.env.SMTP_PASS!.trim();
     this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST!,
+      host: smtpHost,
       port,
       secure,
       requireTLS: port === 587,
       auth: {
         user: process.env.SMTP_USER!,
-        pass: process.env.SMTP_PASS!,
+        pass:
+          smtpHost.toLowerCase() === 'smtp.gmail.com'
+            ? smtpPassword.replace(/\s+/g, '')
+            : smtpPassword,
       },
       tls: {
         rejectUnauthorized: true,
