@@ -16,6 +16,7 @@ const userSelect = {
   location: true,
   company: true,
   photo: true,
+  active: true,
   createdAt: true,
 } as const;
 
@@ -27,6 +28,30 @@ export class UsersService {
     return this.prisma.user.findMany({
       select: userSelect,
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async updateStatus(
+    userId: string,
+    requestingAdminId: string,
+    active: boolean,
+  ) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true },
+    });
+    if (!user) throw new NotFoundException('User not found.');
+    if (user.role === UserRole.ADMIN) {
+      throw new BadRequestException('Admin accounts cannot be deactivated.');
+    }
+    if (userId === requestingAdminId && !active) {
+      throw new BadRequestException('You cannot deactivate your own account.');
+    }
+
+    return this.prisma.user.update({
+      where: { id: userId },
+      data: { active },
+      select: userSelect,
     });
   }
 
@@ -44,21 +69,33 @@ export class UsersService {
       throw new BadRequestException('Admin accounts cannot be deleted.');
     }
 
-    const [bookingCount, disputeCount] = await Promise.all([
-      this.prisma.booking.count({
-        where: {
-          OR: [{ importerId: userId }, { truck: { ownerId: userId } }],
-        },
-      }),
-      this.prisma.dispute.count({ where: { raisedBy: userId } }),
-    ]);
-    if (bookingCount > 0 || disputeCount > 0) {
-      throw new ConflictException(
-        'This user has booking or dispute history and cannot be deleted. Suspend the account instead.',
-      );
-    }
+    return this.prisma.$transaction(async (transaction) => {
+      const [bookingCount, disputeCount] = await Promise.all([
+        transaction.booking.count({
+          where: {
+            OR: [{ importerId: userId }, { truck: { ownerId: userId } }],
+          },
+        }),
+        transaction.dispute.count({ where: { raisedBy: userId } }),
+      ]);
+      if (bookingCount > 0 || disputeCount > 0) {
+        throw new ConflictException(
+          'This user has booking or dispute history and cannot be deleted. Deactivate the account instead.',
+        );
+      }
 
-    await this.prisma.user.delete({ where: { id: userId } });
-    return { id: userId };
+      const wallet = await transaction.wallet.findUnique({
+        where: { userId },
+        select: { id: true },
+      });
+      if (wallet) {
+        await transaction.walletTransaction.deleteMany({
+          where: { walletId: wallet.id },
+        });
+      }
+
+      await transaction.user.delete({ where: { id: userId } });
+      return { id: userId };
+    });
   }
 }

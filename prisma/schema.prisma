@@ -67,6 +67,7 @@ model User {
   phone        String?
   passwordHash String
   role         UserRole
+  active       Boolean   @default(true)
   location     String?
   company      String?
   photo        String?

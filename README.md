@@ -47,9 +47,10 @@ Password-reset links are sent through Gmail SMTP. Configure `SMTP_HOST`,
 with 2-Step Verification enabled, not your regular account password. The mailer
 removes spaces from a pasted Gmail App Password automatically. Set
 `FRONTEND_URL` to the public frontend origin so links return to the
-reset-password page. Reset links expire after one hour; the raw reset token is
-never returned by the API. Keep `SMTP_PASS` private and rotate it immediately
-if it is exposed.
+reset-password form. Users request a link from `/forgot-password`; the emailed
+link opens `/reset-password` and submits the new password to the reset API.
+Reset links expire after one hour; the raw reset token is never returned by the
+API. Keep `SMTP_PASS` private and rotate it immediately if it is exposed.
 
 If SMTP reports `self-signed certificate in certificate chain`, the network is
 likely intercepting TLS. Export that network or antivirus root certificate as
@@ -72,6 +73,23 @@ client:
 npm run prisma:push
 npm run prisma:generate
 ```
+
+The admin account-status feature requires the `User.active` column. The
+existing database is not managed by Prisma Migrate; apply
+`prisma/add-user-active-column.sql` to the intended database, or run
+`npm run prisma:push` only after verifying the configured `DATABASE_URL`
+points to the intended environment.
+
+Admin user management supports activating and deactivating non-admin accounts.
+Deactivated users cannot log in, and their existing API tokens are rejected.
+Users with booking or dispute history cannot be permanently deleted; deactivate
+them to preserve marketplace records. Deleting an account with no booking or
+dispute history also deletes its wallet transaction history.
+The admin wallet dashboard reads every account balance and its transaction
+history from the admin-only `GET /wallet/admin/accounts` endpoint. Its
+commission balance, lifetime earned total, and six-month release history come
+from `GET /wallet/admin/commission`, backed by wallet and released booking
+payment records.
 
 Live trip tracking stores only the truck's latest GPS position on its booking.
 The owner must explicitly start sharing from the active trip page; location

@@ -16,7 +16,11 @@ import {
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateDepositDto, CreateWithdrawalDto, WalletActor } from './wallet.dto';
+import {
+  CreateDepositDto,
+  CreateWithdrawalDto,
+  WalletActor,
+} from './wallet.dto';
 
 @Injectable()
 export class PaymentsService {
@@ -37,12 +41,43 @@ export class PaymentsService {
     };
   }
 
+  async getAdminWalletAccounts() {
+    const users = await this.prisma.user.findMany({
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        role: true,
+        wallet: {
+          select: {
+            balanceRwf: true,
+            transactions: {
+              orderBy: { createdAt: 'desc' },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    return users.map((user) => ({
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      balanceRwf: user.wallet?.balanceRwf ?? 0,
+      transactions: user.wallet?.transactions ?? [],
+    }));
+  }
+
   async getRwandaBanks() {
     return [{ id: 'MOCK_BANK', code: 'MOCK_BANK', name: 'Simulation bank' }];
   }
 
   async getRwandaBankBranches(bankCode: string) {
-    return [{ id: 'MOCK_BRANCH', code: 'MOCK_BRANCH', name: 'Simulation branch' }];
+    return [
+      { id: 'MOCK_BRANCH', code: 'MOCK_BRANCH', name: 'Simulation branch' },
+    ];
   }
 
   async createDeposit(userId: string, dto: CreateDepositDto) {
@@ -119,7 +154,9 @@ export class PaymentsService {
       RETURNING "id"
     `;
     if (!reserved.length) {
-      throw new BadRequestException('Wallet balance is too low for this withdrawal.');
+      throw new BadRequestException(
+        'Wallet balance is too low for this withdrawal.',
+      );
     }
 
     await this.prisma.walletTransaction.update({
@@ -153,7 +190,9 @@ export class PaymentsService {
       );
     }
     if (booking.payment) {
-      throw new BadRequestException('This booking already has a payment record.');
+      throw new BadRequestException(
+        'This booking already has a payment record.',
+      );
     }
 
     const wallet = await this.getOrCreateWallet(actor.id);
@@ -211,14 +250,18 @@ export class PaymentsService {
           where: { bookingId },
         });
       }
-      throw new BadRequestException('Wallet balance is too low for this booking.');
+      throw new BadRequestException(
+        'Wallet balance is too low for this booking.',
+      );
     } catch (error) {
       if (error instanceof BadRequestException) throw error;
       const existing = await this.prisma.bookingPayment.findUnique({
         where: { bookingId },
       });
       if (existing) {
-        throw new BadRequestException('This booking already has a payment record.');
+        throw new BadRequestException(
+          'This booking already has a payment record.',
+        );
       }
       throw error;
     }
@@ -323,17 +366,56 @@ export class PaymentsService {
     if (actor.role !== 'ADMIN') {
       throw new ForbiddenException('Only admins can view platform commission.');
     }
-    const [wallet, total] = await Promise.all([
+    const now = new Date();
+    const firstMonth = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 5, 1),
+    );
+    const [wallet, total, releasedPayments] = await Promise.all([
       this.getOrCreateWallet(actor.id),
       this.prisma.bookingPayment.aggregate({
         where: { status: BookingPaymentStatus.RELEASED },
         _sum: { commissionRwf: true },
       }),
+      this.prisma.bookingPayment.findMany({
+        where: {
+          status: BookingPaymentStatus.RELEASED,
+          releasedAt: { gte: firstMonth },
+        },
+        select: { commissionRwf: true, releasedAt: true },
+      }),
     ]);
+
+    const monthlyHistory = Array.from({ length: 6 }, (_, index) => {
+      const date = new Date(
+        Date.UTC(
+          firstMonth.getUTCFullYear(),
+          firstMonth.getUTCMonth() + index,
+          1,
+        ),
+      );
+      return {
+        month: date.toISOString().slice(0, 7),
+        totalRwf: 0,
+      };
+    });
+
+    for (const payment of releasedPayments) {
+      if (!payment.releasedAt) continue;
+      const releasedAt = new Date(payment.releasedAt);
+      const monthIndex =
+        (releasedAt.getUTCFullYear() - firstMonth.getUTCFullYear()) * 12 +
+        releasedAt.getUTCMonth() -
+        firstMonth.getUTCMonth();
+      if (monthIndex >= 0 && monthIndex < monthlyHistory.length) {
+        monthlyHistory[monthIndex].totalRwf += payment.commissionRwf;
+      }
+    }
+
     return {
       availableRwf: wallet.balanceRwf,
       totalEarnedRwf: total._sum.commissionRwf ?? 0,
       currency: 'RWF',
+      monthlyHistory,
     };
   }
 
@@ -348,7 +430,9 @@ export class PaymentsService {
   private getCommissionBps() {
     const value = Number(process.env.PAYMENT_COMMISSION_BPS ?? 600);
     if (!Number.isInteger(value) || value < 0 || value > 10000) {
-      throw new ServiceUnavailableException('Payment commission configuration is invalid.');
+      throw new ServiceUnavailableException(
+        'Payment commission configuration is invalid.',
+      );
     }
     return value;
   }
@@ -359,5 +443,4 @@ export class PaymentsService {
     if (digits.length === 12 && digits.startsWith('250')) return digits;
     throw new BadRequestException('Enter a valid Rwanda mobile number.');
   }
-
 }

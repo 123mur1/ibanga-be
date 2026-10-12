@@ -7,8 +7,15 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { UserRole } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { CreateDepositDto, CreateWithdrawalDto, WalletActor } from './wallet.dto';
+import { Roles } from '../auth/roles.decorator';
+import { RolesGuard } from '../auth/roles.guard';
+import {
+  CreateDepositDto,
+  CreateWithdrawalDto,
+  WalletActor,
+} from './wallet.dto';
 import { PaymentsService } from './payments.service';
 
 type AuthedRequest = { user: WalletActor };
@@ -21,6 +28,13 @@ export class WalletController {
   @Get()
   getWallet(@Req() req: AuthedRequest) {
     return this.payments.getWallet(req.user.id);
+  }
+
+  @Get('admin/accounts')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN)
+  getAdminWalletAccounts() {
+    return this.payments.getAdminWalletAccounts();
   }
 
   @Get('admin/commission')
@@ -39,10 +53,7 @@ export class WalletController {
   }
 
   @Post('deposits')
-  createDeposit(
-    @Req() req: AuthedRequest,
-    @Body() dto: CreateDepositDto,
-  ) {
+  createDeposit(@Req() req: AuthedRequest, @Body() dto: CreateDepositDto) {
     return this.payments.createDeposit(req.user.id, dto);
   }
 

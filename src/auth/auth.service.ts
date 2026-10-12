@@ -79,6 +79,11 @@ export class AuthService {
     if (!ok) {
       throw new UnauthorizedException('Invalid email or password.');
     }
+    if (!user.active) {
+      throw new UnauthorizedException(
+        'This account is deactivated. Contact an administrator.',
+      );
+    }
 
     const publicUser = {
       id: user.id,
