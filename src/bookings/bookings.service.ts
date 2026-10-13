@@ -208,6 +208,20 @@ export class BookingsService {
     const isOwner = booking.truck.ownerId === actor.id;
     const isImporter = booking.importerId === actor.id;
     const disputeResolved = booking.dispute?.status === 'RESOLVED';
+    if (
+      booking.payment?.status === 'RELEASED' &&
+      dto.status !== BookingStatus.COMPLETED
+    ) {
+      throw new BadRequestException(
+        'A booking with released payment must remain completed.',
+      );
+    }
+    if (
+      booking.status === BookingStatus.COMPLETED &&
+      dto.status !== BookingStatus.COMPLETED
+    ) {
+      throw new BadRequestException('Completed bookings cannot be reopened.');
+    }
     this.assertStatusChange(
       actor,
       booking.status,
@@ -230,20 +244,29 @@ export class BookingsService {
     }
 
     if (dto.status === BookingStatus.COMPLETED) {
-      if (!isImporter) {
+      const canReconcileReleasedPayment =
+        actor.role === UserRole.ADMIN &&
+        booking.payment?.status === 'RELEASED';
+      if (!isImporter && !canReconcileReleasedPayment) {
         throw new ForbiddenException(
           'Only the importer can confirm delivery and release the held payment.',
         );
       }
-      const payment = await this.prisma.bookingPayment.findUnique({
-        where: { bookingId: id },
-      });
-      if (payment?.status !== 'FUNDED') {
+      const paymentStatus =
+        booking.payment?.status ??
+        (
+          await this.prisma.bookingPayment.findUnique({
+            where: { bookingId: id },
+            select: { status: true },
+          })
+        )?.status;
+      if (paymentStatus === 'FUNDED' && isImporter) {
+        await this.payments.releaseBookingFunds(id);
+      } else if (paymentStatus !== 'RELEASED') {
         throw new BadRequestException(
           'The booking has no held payment to release.',
         );
       }
-      await this.payments.releaseBookingFunds(id);
     }
 
     const updated = await this.prisma.booking.update({
