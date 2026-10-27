@@ -195,63 +195,59 @@ export class PaymentsService {
       );
     }
 
-    const wallet = await this.getOrCreateWallet(actor.id);
     const amountRwf = booking.agreedPriceRwf;
     const commissionBps = this.getCommissionBps();
     const commissionRwf = Math.round((amountRwf * commissionBps) / 10000);
     const ownerAmountRwf = amountRwf - commissionRwf;
     const paymentId = randomUUID();
-    const transactionId = randomUUID();
-    const reference = `ibanga-booking-${bookingId}`;
-
     try {
       const rows = await this.prisma.$queryRaw<{ id: string }[]>`
-        WITH debited_wallet AS (
-          UPDATE "Wallet"
-          SET "balanceRwf" = "balanceRwf" - ${amountRwf}, "updatedAt" = NOW()
-          WHERE "id" = ${wallet.id}
-            AND "balanceRwf" >= ${amountRwf}
-            AND EXISTS (
-              SELECT 1 FROM "Booking"
-              WHERE "id" = ${bookingId}
-                AND "importerId" = ${actor.id}
-                AND "status" = CAST(${BookingStatus.ACCEPTED} AS "BookingStatus")
-            )
-          RETURNING "id"
-        ), created_payment AS (
-          INSERT INTO "BookingPayment" (
-            "id", "bookingId", "status", "amountRwf", "commissionRwf",
-            "ownerAmountRwf", "fundedAt", "createdAt", "updatedAt"
-          )
-          SELECT
-            ${paymentId}, ${bookingId},
-            CAST(${BookingPaymentStatus.FUNDED} AS "BookingPaymentStatus"),
-            ${amountRwf}, ${commissionRwf}, ${ownerAmountRwf}, NOW(), NOW(), NOW()
-          FROM debited_wallet
-          RETURNING "bookingId"
-        ), created_transaction AS (
-          INSERT INTO "WalletTransaction" (
-            "id", "walletId", "bookingId", "type", "status", "direction",
-            "amountRwf", "reference", "description", "createdAt", "updatedAt"
-          )
-          SELECT
-            ${transactionId}, debited_wallet."id", ${bookingId},
-            CAST(${WalletTransactionType.BOOKING_PAYMENT} AS "WalletTransactionType"),
-            CAST(${WalletTransactionStatus.SUCCEEDED} AS "WalletTransactionStatus"),
-            CAST(${WalletTransactionDirection.DEBIT} AS "WalletTransactionDirection"),
-            ${amountRwf}, ${reference}, 'Payment held for booking', NOW(), NOW()
-          FROM debited_wallet CROSS JOIN created_payment
-          RETURNING "id"
+        INSERT INTO "BookingPayment" (
+          "id", "bookingId", "status", "amountRwf", "commissionRwf",
+          "ownerAmountRwf", "fundedAt", "createdAt", "updatedAt"
         )
-        SELECT "id" FROM created_transaction
+        SELECT
+          ${paymentId}, "id",
+          CAST(${BookingPaymentStatus.FUNDED} AS "BookingPaymentStatus"),
+          ${amountRwf}, ${commissionRwf}, ${ownerAmountRwf}, NOW(), NOW(), NOW()
+        FROM "Booking"
+        WHERE "id" = ${bookingId}
+          AND "importerId" = ${actor.id}
+          AND "status" = CAST(${BookingStatus.ACCEPTED} AS "BookingStatus")
+          AND NOT EXISTS (
+            SELECT 1 FROM "BookingPayment" WHERE "bookingId" = ${bookingId}
+          )
+        RETURNING "id"
       `;
       if (rows.length) {
-        return this.prisma.bookingPayment.findUniqueOrThrow({
+        const payment = await this.prisma.bookingPayment.findUniqueOrThrow({
           where: { bookingId },
         });
+        const notificationId = randomUUID();
+        await this.prisma.operationsRecord.createMany({
+          data: [
+            {
+              domain: 'notifications',
+              recordId: notificationId,
+              ownerId: booking.truck.ownerId,
+              searchText: `Importer paid for booking ${bookingId}`,
+              data: {
+                id: notificationId,
+                userId: booking.truck.ownerId,
+                category: 'PAYMENT',
+                title: 'Importer paid for your booking',
+                body: `Payment for booking ${bookingId} is recorded and held until delivery is confirmed.`,
+                href: `/dashboard/owner/payments/${bookingId}`,
+                read: false,
+                createdAt: new Date().toISOString(),
+              },
+            },
+          ],
+        });
+        return payment;
       }
       throw new BadRequestException(
-        'Wallet balance is too low for this booking.',
+        'This booking is no longer available for payment.',
       );
     } catch (error) {
       if (error instanceof BadRequestException) throw error;

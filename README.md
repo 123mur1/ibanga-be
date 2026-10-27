@@ -59,12 +59,11 @@ verification enabled; do not disable TLS verification to work around this error.
 
 ## Simulated payments
 
-All deposits, withdrawals, and booking payments use the app's simulated wallet
-ledger in every environment. No payment provider is contacted, no real money is
-charged or transferred, and balances have no monetary value. Deposits are
-credited to the test wallet, withdrawals update test records only, and booking
-funds move between internal test balances. Do not use these balances as escrow
-or for real transactions.
+Payments are simulated in every environment. No payment provider is contacted,
+no real money is charged or transferred, and balances have no monetary value.
+Wallet deposits and balances are not required to pay for a booking. A simulated
+booking payment is recorded as funded so the trip workflow can be exercised.
+Do not use these records as escrow or for real transactions.
 
 After configuring `DATABASE_URL`, apply the Prisma schema and regenerate the
 client:
@@ -79,6 +78,12 @@ existing database is not managed by Prisma Migrate; apply
 `prisma/add-user-active-column.sql` to the intended database, or run
 `npm run prisma:push` only after verifying the configured `DATABASE_URL`
 points to the intended environment.
+
+Operations record filtering requires the `parentId`, `status`, and `truckId`
+columns and their indexes. For a database that already has the original
+`OperationsRecord` table, apply `prisma/add-operations-record-metadata.sql`
+to the intended environment. This update is additive and preserves existing
+records.
 
 Admin user management supports activating and deactivating non-admin accounts.
 Deactivated users cannot log in, and their existing API tokens are rejected.
@@ -101,6 +106,58 @@ snapshots that listing price. Owners cannot change the price per booking or
 start a trip before the importer records the simulated booking payment. Dispute
 resolution alone does not release the simulated funds or unlock the truck; the
 importer must still confirm receipt.
+
+## Frontend operations data API
+
+The operations UI uses browser-backed demonstration services by default. To
+use the backend for the first connected workflow, copy the frontend
+`.env.example` to `.env.local`, set `NEXT_PUBLIC_DATA_SOURCE=api`,
+`NEXT_PUBLIC_OPS_DATA_SOURCE=api`, and set `NEXT_PUBLIC_API_URL` to the backend
+origin. Start the backend and frontend locally; the frontend reuses its normal
+JWT login and sends the token with requests. In this first integration, cargo
+requests and quotations use the API; the other operations service areas remain
+demonstration-backed until they are implemented.
+
+The authenticated `/operations/:domain` API provides persistent records.
+Supported domains are
+`cargo-requests`, `quotations`, `drivers`, `driver-assignments`,
+`truck-profiles`, `shipments`, `settlements`, `payouts`, `documents`,
+`verification-requests`, `cancellations`, `dispute-cases`, `incidents`,
+`insurance-policies`, `insurance-claims`, `support-tickets`, `notifications`,
+`notification-preferences`, `announcements`, `audit-logs`, `reconciliation`,
+`admin-profiles`, `settings`, `reviews`, and `refunds`.
+
+Cargo requests, quotations, and driver registration are exposed as:
+
+| Method  | Endpoint                                                   | Purpose                                                                                                                                                    |
+| ------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET`   | `/operations/cargo-requests?page=1&pageSize=25&search=...` | Importer's requests; truck owners see open opportunities                                                                                                   |
+| `POST`  | `/operations/cargo-requests`                               | Create a request with `{ "data": { ... }, "draft": true }`; omit `draft` to publish                                                                        |
+| `GET`   | `/operations/cargo-requests/:id`                           | Read a request the signed-in user may access                                                                                                               |
+| `PATCH` | `/operations/cargo-requests/:id`                           | Update an owned draft or open request with `{ "data": { ... } }`                                                                                           |
+| `POST`  | `/operations/cargo-requests/:id/publish`                   | Validate and publish a saved draft                                                                                                                         |
+| `POST`  | `/operations/cargo-requests/:id/cancel`                    | Cancel with `{ "reason": "..." }` and close submitted quotations                                                                                           |
+| `GET`   | `/operations/cargo-requests/:id/quotations`                | List quotations visible to the importer or truck owner                                                                                                     |
+| `GET`   | `/operations/quotations`                                   | Paginated quotes visible to the signed-in user                                                                                                             |
+| `POST`  | `/operations/quotations`                                   | Submit `{ "data": { cargoRequestId, truckId, amountRwf, estimatedPickupDate, estimatedDeliveryDate, notes } }`                                             |
+| `POST`  | `/operations/quotations/:id/withdraw`                      | Withdraw an owner's submitted quotation                                                                                                                    |
+| `POST`  | `/operations/quotations/:id/accept`                        | Atomically accept a quote, create the accepted booking and scheduled shipment, and reserve its truck                                                       |
+| `POST`  | `/operations/drivers`                                      | Create a driver sign-in account and linked driver record atomically; truck owners can register for their own trucks and admins must select an active owner |
+
+Driver list, read, and edit operations use `/operations/drivers` and
+`/operations/drivers/:id`. Driver passwords are hashed and never stored in the
+operations record.
+
+The API derives the actor from the JWT rather than trusting frontend-supplied
+owner IDs. Quote acceptance creates the booking on the server; payment remains
+a separate step. Other domains have authenticated record CRUD at
+`/operations/:domain`, but their workflow-specific state transitions and
+provider integrations are not implemented yet. Administrative records are
+admin-only, and deletion is restricted to documents and announcements.
+
+Before running `npm run prisma:push`, confirm `DATABASE_URL` points to a
+development or staging database. Do not point this operation at production
+without an approved migration and backup plan.
 
 ## Compile and run the project
 

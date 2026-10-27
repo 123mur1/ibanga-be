@@ -95,10 +95,22 @@ export class BookingsService {
         'This truck was just booked by another importer.',
       );
     }
-    return this.prisma.booking.findUniqueOrThrow({
+    const booking = await this.prisma.booking.findUniqueOrThrow({
       where: { id: created[0].id },
       include: BOOKING_INCLUDE,
     });
+    await this.notifyUsers(
+      [
+        {
+          userId: truck.ownerId,
+          role: UserRole.TRUCK_OWNER,
+          title: 'New truck booking',
+          body: `A customer booked your truck for cargo from ${dto.pickupLocation} to ${dto.destination}.`,
+        },
+      ],
+      bookingId,
+    );
+    return booking;
   }
 
   findAll(actor: Actor) {
@@ -245,8 +257,7 @@ export class BookingsService {
 
     if (dto.status === BookingStatus.COMPLETED) {
       const canReconcileReleasedPayment =
-        actor.role === UserRole.ADMIN &&
-        booking.payment?.status === 'RELEASED';
+        actor.role === UserRole.ADMIN && booking.payment?.status === 'RELEASED';
       if (!isImporter && !canReconcileReleasedPayment) {
         throw new ForbiddenException(
           'Only the importer can confirm delivery and release the held payment.',
@@ -293,7 +304,92 @@ export class BookingsService {
         data: { status: TruckStatus.AVAILABLE },
       });
     }
+    if (updated.status !== booking.status) {
+      const noticeByStatus = {
+        [BookingStatus.ACCEPTED]: {
+          recipients: [UserRole.IMPORTER],
+          title: 'Owner accepted your booking',
+          body: `The truck owner accepted booking ${id}. You can now arrange payment.`,
+        },
+        [BookingStatus.REJECTED]: {
+          recipients: [UserRole.IMPORTER],
+          title: 'Booking declined',
+          body: `The truck owner declined booking ${id}.`,
+        },
+        [BookingStatus.IN_PROGRESS]: {
+          recipients: [UserRole.IMPORTER],
+          title: 'Trip started',
+          body: `Booking ${id} has left pickup and is now in transit.`,
+        },
+        [BookingStatus.DELIVERED]: {
+          recipients: [UserRole.IMPORTER],
+          title: 'Cargo delivered',
+          body: `Booking ${id} is marked delivered. Confirm receipt or report a problem.`,
+        },
+        [BookingStatus.COMPLETED]: {
+          recipients: [UserRole.TRUCK_OWNER, UserRole.IMPORTER],
+          title: 'Receipt confirmed and booking completed',
+          body: `Receipt for booking ${id} was confirmed and the booking is complete.`,
+        },
+        [BookingStatus.DISPUTED]: {
+          recipients: [UserRole.TRUCK_OWNER],
+          title: 'Booking disputed',
+          body: `The importer reported a problem with booking ${id}.`,
+        },
+        [BookingStatus.PENDING]: {
+          recipients: [],
+          title: 'Booking updated',
+          body: `Booking ${id} was updated.`,
+        },
+      } satisfies Record<
+        BookingStatus,
+        { recipients: UserRole[]; title: string; body: string }
+      >;
+      const notice = noticeByStatus[dto.status];
+      await this.notifyUsers(
+        notice.recipients.map((role) => ({
+          ...notice,
+          role,
+          userId:
+            role === UserRole.IMPORTER
+              ? booking.importerId
+              : booking.truck.ownerId,
+        })),
+        id,
+      );
+    }
     return updated;
+  }
+
+  private notifyUsers(
+    notices: { userId: string; role: UserRole; title: string; body: string }[],
+    bookingId: string,
+  ) {
+    if (!notices.length) return Promise.resolve();
+    const createdAt = new Date().toISOString();
+    return this.prisma.operationsRecord
+      .createMany({
+        data: notices.map(({ userId, role, title, body }) => {
+          const notificationId = randomUUID();
+          return {
+            domain: 'notifications',
+            recordId: notificationId,
+            ownerId: userId,
+            searchText: `${title} ${body} ${bookingId}`,
+            data: {
+              id: notificationId,
+              userId,
+              category: 'BOOKING',
+              title,
+              body,
+              href: `/dashboard/${role === UserRole.IMPORTER ? 'importer' : 'owner'}/bookings/${bookingId}`,
+              read: false,
+              createdAt,
+            },
+          };
+        }),
+      })
+      .then(() => undefined);
   }
 
   private assertCanView(

@@ -9,6 +9,7 @@ import { DemoModule } from './demo/demo.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { DisputesModule } from './disputes/disputes.module';
 import { PaymentsModule } from './payments/payments.module';
+import { OperationsModule } from './operations/operations.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { PaymentsModule } from './payments/payments.module';
     BookingsModule,
     DisputesModule,
     PaymentsModule,
+    OperationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

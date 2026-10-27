@@ -8,6 +8,79 @@ describe('PaymentsService', () => {
   };
   const service = new PaymentsService({} as PrismaService);
 
+  it('records a simulated booking payment without requiring a funded wallet', async () => {
+    const payment = {
+      bookingId: 'booking-1',
+      status: 'FUNDED',
+      amountRwf: 100000,
+      commissionRwf: 6000,
+      ownerAmountRwf: 94000,
+    };
+    const bookingFind = jest.fn().mockResolvedValue({
+      importerId: 'importer-1',
+      status: 'ACCEPTED',
+      agreedPriceRwf: 100000,
+      payment: null,
+      truck: { ownerId: 'owner-1' },
+    });
+    const insertPayment = jest.fn().mockResolvedValue([{ id: 'payment-1' }]);
+    const paymentFind = jest.fn().mockResolvedValue(payment);
+    const walletUpsert = jest.fn();
+    const createNotification = jest.fn().mockResolvedValue({ count: 1 });
+    const payments = new PaymentsService({
+      booking: { findUnique: bookingFind },
+      bookingPayment: {
+        findUniqueOrThrow: paymentFind,
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
+      operationsRecord: { createMany: createNotification },
+      wallet: { upsert: walletUpsert },
+      $queryRaw: insertPayment,
+    } as unknown as PrismaService);
+
+    await expect(
+      payments.payBooking({ id: 'importer-1', role: 'IMPORTER' }, 'booking-1'),
+    ).resolves.toEqual(payment);
+    expect(insertPayment).toHaveBeenCalledTimes(1);
+    expect(paymentFind).toHaveBeenCalledWith({
+      where: { bookingId: 'booking-1' },
+    });
+    expect(walletUpsert).not.toHaveBeenCalled();
+    expect(createNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            domain: 'notifications',
+            ownerId: 'owner-1',
+            data: expect.objectContaining({
+              title: 'Importer paid for your booking',
+              category: 'PAYMENT',
+            }),
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('does not create a second payment record for an already paid booking', async () => {
+    const bookingFind = jest.fn().mockResolvedValue({
+      importerId: 'importer-1',
+      status: 'ACCEPTED',
+      agreedPriceRwf: 100000,
+      payment: { status: 'FUNDED' },
+    });
+    const insertPayment = jest.fn();
+    const payments = new PaymentsService({
+      booking: { findUnique: bookingFind },
+      $queryRaw: insertPayment,
+    } as unknown as PrismaService);
+
+    await expect(
+      payments.payBooking({ id: 'importer-1', role: 'IMPORTER' }, 'booking-1'),
+    ).rejects.toThrow('This booking already has a payment record.');
+    expect(insertPayment).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     if (originalEnvironment.nodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = originalEnvironment.nodeEnv;

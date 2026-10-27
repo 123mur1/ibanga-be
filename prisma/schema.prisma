@@ -11,6 +11,7 @@ enum UserRole {
   IMPORTER
   TRUCK_OWNER
   ADMIN
+  DRIVER
 }
 
 enum TruckStatus {
@@ -219,4 +220,24 @@ model Dispute {
 
   @@index([raisedBy])
   @@index([status])
+}
+
+model OperationsRecord {
+  id          String   @id @default(uuid())
+  domain      String
+  recordId    String
+  ownerId     String?
+  audience    String?
+  parentId    String?
+  status      String?
+  truckId     String?
+  searchText  String   @default("")
+  data        Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([domain, recordId])
+  @@index([domain, ownerId, updatedAt])
+  @@index([domain, parentId, status])
+  @@index([domain, truckId, parentId])
 }
