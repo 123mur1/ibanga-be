@@ -40,6 +40,9 @@ export const ADMIN_ONLY_DOMAINS: ReadonlySet<OperationsDomain> = new Set([
 export const ADMIN_WRITE_DOMAINS: ReadonlySet<OperationsDomain> = new Set([
   ...ADMIN_ONLY_DOMAINS,
   'announcements',
+  // Importers post reviews through POST /trucks/:id/reviews, which checks they shipped with the
+  // truck. Through this generic API only an administrator may change them (moderation).
+  'reviews',
 ]);
 
 export const PUBLIC_READ_DOMAINS: ReadonlySet<OperationsDomain> = new Set([

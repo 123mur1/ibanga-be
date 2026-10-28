@@ -67,6 +67,18 @@ export class OperationsController {
     return this.operations.acceptQuotation(id, req.user);
   }
 
+  /** Several domains in one response: `?domains=a,b`, or every readable domain. */
+  @Get('snapshot')
+  snapshot(@Req() req: AuthedRequest, @Query('domains') domains?: string) {
+    return this.operations.snapshot(
+      req.user,
+      domains
+        ?.split(',')
+        .map((domain) => domain.trim())
+        .filter(Boolean),
+    );
+  }
+
   @Get(':domain')
   list(
     @Param('domain') domain: string,

@@ -11,10 +11,14 @@ import { PaymentsService } from '../payments/payments.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
 import { UpdateTrackingLocationDto } from './dto/update-tracking-location.dto';
+import { TruckPhotos } from '../trucks/truck-photos';
+import { verificationByTruck } from '../trucks/truck-verification';
 
 type Actor = { id: string; role: UserRole };
 const BOOKING_INCLUDE = {
   truck: {
+    // Inline photos are large; lists point at the cover photo URL instead.
+    omit: { photos: true },
     include: {
       owner: {
         select: {
@@ -39,6 +43,7 @@ export class BookingsService {
   constructor(
     private prisma: PrismaService,
     private payments: PaymentsService,
+    private truckPhotos: TruckPhotos = new TruckPhotos(prisma),
   ) {}
 
   async create(actor: Actor, dto: CreateBookingDto) {
@@ -113,18 +118,33 @@ export class BookingsService {
     return booking;
   }
 
-  findAll(actor: Actor) {
+  async findAll(actor: Actor) {
     const where: Prisma.BookingWhereInput =
       actor.role === UserRole.ADMIN
         ? {}
         : actor.role === UserRole.IMPORTER
           ? { importerId: actor.id }
           : { truck: { ownerId: actor.id } };
-    return this.prisma.booking.findMany({
+    const bookings = await this.prisma.booking.findMany({
       where,
       include: BOOKING_INCLUDE,
       orderBy: { createdAt: 'desc' },
     });
+    const trucks = bookings.map((booking) => booking.truck);
+    const [covers, verification] = await Promise.all([
+      this.truckPhotos.covers(trucks),
+      verificationByTruck(this.prisma, [
+        ...new Set(trucks.map((truck) => truck.id)),
+      ]),
+    ]);
+    return bookings.map((booking) => ({
+      ...booking,
+      truck: {
+        ...booking.truck,
+        ...(covers.get(booking.truck.id) ?? { photos: [], photoCount: 0 }),
+        verification: verification.get(booking.truck.id) ?? 'NOT_SUBMITTED',
+      },
+    }));
   }
 
   async findOne(actor: Actor, id: string) {

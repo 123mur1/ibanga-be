@@ -8,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateTruckDto } from './dto/create-truck.dto';
 import { QueryTrucksDto } from './dto/query-trucks.dto';
 import { UpdateTruckDto } from './dto/update-truck.dto';
+import { TruckPhotos } from './truck-photos';
+import { verificationByTruck } from './truck-verification';
 
 const OWNER_SELECT = {
   id: true,
@@ -20,6 +22,11 @@ const OWNER_SELECT = {
 
 const TRUCK_INCLUDE = { owner: { select: OWNER_SELECT } } as const;
 
+/** Lists repeat the owner on every truck, so they leave out the (inline, large) profile photo. */
+const LIST_INCLUDE = {
+  owner: { select: { ...OWNER_SELECT, photo: false } },
+} as const;
+
 const ACTIVE_BOOKING_STATUSES: BookingStatus[] = [
   BookingStatus.PENDING,
   BookingStatus.ACCEPTED,
@@ -30,7 +37,10 @@ const ACTIVE_BOOKING_STATUSES: BookingStatus[] = [
 
 @Injectable()
 export class TrucksService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private truckPhotos: TruckPhotos,
+  ) {}
 
   create(ownerId: string, dto: CreateTruckDto) {
     return this.prisma.truck.create({
@@ -39,7 +49,38 @@ export class TrucksService {
     });
   }
 
-  findAll(
+  /**
+   * Whether an administrator has approved each truck's documents, worked out from the documents
+   * themselves (file contents are not read).
+   */
+  private async withVerification<T extends { id: string }>(trucks: T[]) {
+    const verification = await verificationByTruck(
+      this.prisma,
+      trucks.map((truck) => truck.id),
+    );
+    return trucks.map((truck) => ({
+      ...truck,
+      verification: verification.get(truck.id) ?? 'NOT_SUBMITTED',
+    }));
+  }
+
+  async findAll(
+    userId: string | undefined,
+    userRole: UserRole | undefined,
+    query: QueryTrucksDto,
+  ) {
+    const trucks = await this.findTrucks(userId, userRole, query);
+    const [withCovers, withStatus] = await Promise.all([
+      this.truckPhotos.withCovers(trucks),
+      this.withVerification(trucks),
+    ]);
+    return withCovers.map((truck, index) => ({
+      ...truck,
+      verification: withStatus[index].verification,
+    }));
+  }
+
+  private findTrucks(
     userId: string | undefined,
     userRole: UserRole | undefined,
     query: QueryTrucksDto,
@@ -52,7 +93,8 @@ export class TrucksService {
       }
       return this.prisma.truck.findMany({
         where: { ownerId: userId },
-        include: TRUCK_INCLUDE,
+        include: LIST_INCLUDE,
+        omit: { photos: true },
         orderBy: { createdAt: 'desc' },
       });
     }
@@ -73,7 +115,8 @@ export class TrucksService {
           : {}),
         ...(query.minCapacity ? { capacity: { gte: query.minCapacity } } : {}),
       },
-      include: TRUCK_INCLUDE,
+      include: LIST_INCLUDE,
+      omit: { photos: true },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -84,7 +127,8 @@ export class TrucksService {
       include: TRUCK_INCLUDE,
     });
     if (!truck) throw new NotFoundException('Truck not found.');
-    return truck;
+    const [withStatus] = await this.withVerification([truck]);
+    return withStatus;
   }
 
   private async findOwned(id: string, ownerId: string) {

@@ -11,6 +11,7 @@ import { User, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { UserSessionCache } from '../prisma/user-session-cache';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
@@ -35,6 +36,7 @@ export class AuthService {
     private prisma: PrismaService,
     private jwt: JwtService,
     private email: EmailService,
+    private sessions: UserSessionCache = new UserSessionCache(),
   ) {}
 
   async register(dto: RegisterDto) {
@@ -211,7 +213,7 @@ export class AuthService {
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
-    return this.prisma.user.update({
+    const updated = await this.prisma.user.update({
       where: { id: userId },
       data: {
         ...(dto.name === undefined ? {} : { name: dto.name.trim() }),
@@ -224,6 +226,8 @@ export class AuthService {
       },
       select: PUBLIC_USER,
     });
+    this.sessions.invalidate(userId);
+    return updated;
   }
 
   private withToken(user: {

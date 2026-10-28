@@ -24,6 +24,7 @@ import type {
 } from './dto/save-operations-record.dto';
 import { CreateDriverDto } from './dto/create-driver.dto';
 import { PrismaService } from '../prisma/prisma.service';
+import { UserSessionCache } from '../prisma/user-session-cache';
 
 export type OperationsActor = { id: string; role: UserRole };
 
@@ -31,7 +32,10 @@ type OperationsRecordData = Record<string, JsonValue>;
 
 @Injectable()
 export class OperationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly sessions: UserSessionCache = new UserSessionCache(),
+  ) {}
 
   private requireDomain(domain: string): OperationsDomain {
     if ((OPERATIONS_DOMAINS as readonly string[]).includes(domain)) {
@@ -312,7 +316,141 @@ export class OperationsService {
     if (ownerField && actor.role !== UserRole.ADMIN) {
       normalized[ownerField] = actor.id;
     }
+    // Only an administrator decides on documents. Whatever else an owner, importer or driver
+    // sends, their submission waits for review; otherwise anyone could approve themselves.
+    if (
+      actor.role !== UserRole.ADMIN &&
+      (domain === 'documents' || domain === 'verification-requests')
+    ) {
+      normalized.status = 'PENDING';
+      delete normalized.reviewedAt;
+      delete normalized.reviewedBy;
+      delete normalized.rejectionReason;
+    }
     return normalized;
+  }
+
+  /**
+   * The owner of the truck a truck profile or truck document belongs to. Only that owner (or an
+   * administrator) may write it, and a truck profile is always recorded as the owner's, even when
+   * an administrator's review creates it.
+   */
+  private async truckOwnerFor(
+    domain: OperationsDomain,
+    data: OperationsRecordData,
+    actor: OperationsActor,
+  ): Promise<string | undefined> {
+    const truckId =
+      domain === 'truck-profiles'
+        ? data.truckId
+        : domain === 'documents' && data.subjectKind === 'TRUCK'
+          ? data.subjectId
+          : undefined;
+    if (domain !== 'truck-profiles' && truckId === undefined) return undefined;
+    if (typeof truckId !== 'string' || !truckId) {
+      throw new BadRequestException('Choose the truck this record is for.');
+    }
+    const truck = await this.prisma.truck.findUnique({
+      where: { id: truckId },
+      select: { ownerId: true },
+    });
+    if (!truck) throw new NotFoundException('Truck not found.');
+    if (actor.role !== UserRole.ADMIN && truck.ownerId !== actor.id) {
+      throw new ForbiddenException('This truck belongs to another owner.');
+    }
+    return truck.ownerId;
+  }
+
+  /** Keeps the stored file when an update (for example a review decision) arrives without it. */
+  private keepStoredFile(
+    data: OperationsRecordData,
+    existing: Prisma.JsonValue,
+  ): OperationsRecordData {
+    // `hasFile` only describes list responses; it is never stored.
+    const rest = { ...data };
+    delete rest.hasFile;
+    if (typeof data.fileUrl === 'string' && data.fileUrl) return rest;
+    const stored = this.recordData(existing);
+    if (typeof stored.fileUrl !== 'string' || !stored.fileUrl) return rest;
+    return { ...rest, fileUrl: stored.fileUrl };
+  }
+
+  /** Which records of a domain the actor may read. */
+  private async readWhere(
+    domain: OperationsDomain,
+    actor: OperationsActor,
+  ): Promise<Prisma.OperationsRecordWhereInput> {
+    const where: Prisma.OperationsRecordWhereInput = { domain };
+    if (actor.role === UserRole.ADMIN) return where;
+    if (domain === 'cargo-requests' && actor.role === UserRole.TRUCK_OWNER) {
+      where.status = { in: ['OPEN', 'QUOTED'] };
+    } else if (domain === 'quotations' && actor.role === UserRole.IMPORTER) {
+      const requests = await this.prisma.operationsRecord.findMany({
+        where: { domain: 'cargo-requests', ownerId: actor.id },
+        select: { recordId: true },
+      });
+      where.parentId = { in: requests.map((request) => request.recordId) };
+      where.status = { not: 'WITHDRAWN' };
+    } else if (domain === 'drivers' && actor.role === UserRole.DRIVER) {
+      where.data = { path: ['userId'], equals: actor.id };
+    } else if (domain === 'shipments') {
+      where.OR = [
+        { ownerId: actor.id },
+        { data: { path: ['ownerId'], equals: actor.id } },
+        { data: { path: ['importerId'], equals: actor.id } },
+      ];
+    } else if (domain === 'announcements') {
+      where.OR = [
+        { audience: 'ALL' },
+        { audience: actor.role },
+        { audience: null },
+      ];
+    } else if (!PUBLIC_READ_DOMAINS.has(domain)) {
+      where.ownerId = actor.id;
+    }
+    return where;
+  }
+
+  /** A stored record as the actor receives it in a list. */
+  private listItem(
+    domain: OperationsDomain,
+    record: { ownerId: string | null; data: Prisma.JsonValue },
+    actor: OperationsActor,
+  ): Prisma.JsonValue {
+    if (
+      (domain === 'shipments' || domain === 'settlements') &&
+      actor.role === UserRole.TRUCK_OWNER &&
+      record.ownerId === actor.id
+    ) {
+      return { ...this.recordData(record.data), ownerId: actor.id };
+    }
+    return record.data;
+  }
+
+  /**
+   * Document records without their inline files, in the given order. The database strips the
+   * file, so megabytes of data URLs never leave it (GET /operations/documents/:id returns one).
+   */
+  private async documentsWithoutFiles(
+    recordIds: string[],
+  ): Promise<Prisma.JsonValue[]> {
+    if (!recordIds.length) return [];
+    const rows = await this.prisma.$queryRaw<
+      { recordId: string; data: Prisma.JsonValue }[]
+    >`
+      SELECT "recordId",
+        CASE WHEN data->>'fileUrl' LIKE 'data:%'
+          THEN (data - 'fileUrl') || '{"fileUrl": "", "hasFile": true}'::jsonb
+          ELSE data
+        END AS data
+      FROM "OperationsRecord"
+      WHERE domain = 'documents' AND "recordId" = ANY(${recordIds})
+    `;
+    const byId = new Map(rows.map((row) => [row.recordId, row.data]));
+    return recordIds.flatMap((id) => {
+      const data = byId.get(id);
+      return data === undefined ? [] : [data];
+    });
   }
 
   async list(
@@ -324,42 +462,8 @@ export class OperationsService {
     this.assertReadAccess(domain, actor);
     const page = Math.max(1, options.page ?? 1);
     const pageSize = Math.min(1000, Math.max(1, options.pageSize ?? 25));
-    let where: Prisma.OperationsRecordWhereInput = { domain };
-    if (actor.role !== UserRole.ADMIN) {
-      if (domain === 'cargo-requests' && actor.role === UserRole.TRUCK_OWNER) {
-        where.status = { in: ['OPEN', 'QUOTED'] };
-      } else if (domain === 'quotations' && actor.role === UserRole.IMPORTER) {
-        const requests = await this.prisma.operationsRecord.findMany({
-          where: { domain: 'cargo-requests', ownerId: actor.id },
-          select: { recordId: true },
-        });
-        where.parentId = { in: requests.map((request) => request.recordId) };
-        where.status = { not: 'WITHDRAWN' };
-      } else if (domain === 'drivers' && actor.role === UserRole.DRIVER) {
-        where.data = { path: ['userId'], equals: actor.id };
-      } else if (domain === 'shipments') {
-        where.OR = [
-          { ownerId: actor.id },
-          { data: { path: ['ownerId'], equals: actor.id } },
-          { data: { path: ['importerId'], equals: actor.id } },
-        ];
-      } else if (
-        PUBLIC_READ_DOMAINS.has(domain) ||
-        domain === 'announcements'
-      ) {
-        if (domain === 'announcements') {
-          where.OR = [
-            { audience: 'ALL' },
-            { audience: actor.role },
-            { audience: null },
-          ];
-        }
-      } else {
-        where.ownerId = actor.id;
-      }
-    }
-    where = {
-      ...where,
+    const where: Prisma.OperationsRecordWhereInput = {
+      ...(await this.readWhere(domain, actor)),
       ...(options.search?.trim()
         ? {
             searchText: {
@@ -369,30 +473,85 @@ export class OperationsService {
           }
         : {}),
     };
-    const [records, total] = await this.prisma.$transaction([
-      this.prisma.operationsRecord.findMany({
-        where,
-        orderBy: { updatedAt: 'desc' },
-        skip: (page - 1) * pageSize,
-        take: pageSize,
-      }),
-      this.prisma.operationsRecord.count({ where }),
-    ]);
-    return {
-      items: records.map((record) => {
-        if (
-          (domain === 'shipments' || domain === 'settlements') &&
-          actor.role === UserRole.TRUCK_OWNER &&
-          record.ownerId === actor.id
-        ) {
-          return { ...this.recordData(record.data), ownerId: actor.id };
-        }
-        return record.data;
-      }),
-      total,
-      page,
-      pageSize,
+    const query = {
+      where,
+      orderBy: { updatedAt: 'desc' as const },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
     };
+    let items: Prisma.JsonValue[];
+    if (domain === 'documents') {
+      const ids = await this.prisma.operationsRecord.findMany({
+        ...query,
+        select: { recordId: true },
+      });
+      items = await this.documentsWithoutFiles(ids.map((row) => row.recordId));
+    } else {
+      const records = await this.prisma.operationsRecord.findMany(query);
+      items = records.map((record) => this.listItem(domain, record, actor));
+    }
+    // A short first page already holds everything, so counting would only add a round trip.
+    const total =
+      page === 1 && items.length < pageSize
+        ? items.length
+        : await this.prisma.operationsRecord.count({ where });
+    return { items, total, page, pageSize };
+  }
+
+  /**
+   * Every readable record of several domains in one response, read with two queries. Loading a
+   * dashboard used to send one request per domain, each paying for its own database round trips.
+   */
+  async snapshot(actor: OperationsActor, domainNames?: string[]) {
+    const domains = (
+      domainNames?.length
+        ? [...new Set(domainNames)].map((name) => this.requireDomain(name))
+        : [...OPERATIONS_DOMAINS]
+    ).filter(
+      (domain) =>
+        actor.role === UserRole.ADMIN || !ADMIN_ONLY_DOMAINS.has(domain),
+    );
+    const wheres = await Promise.all(
+      domains.map(
+        async (domain) =>
+          [domain, await this.readWhere(domain, actor)] as const,
+      ),
+    );
+    const documentWhere = wheres.find(
+      ([domain]) => domain === 'documents',
+    )?.[1];
+    const otherWheres = wheres
+      .filter(([domain]) => domain !== 'documents')
+      .map(([, where]) => where);
+    const orderBy = { updatedAt: 'desc' as const };
+    const [records, documents] = await Promise.all([
+      otherWheres.length
+        ? this.prisma.operationsRecord.findMany({
+            where: { OR: otherWheres },
+            orderBy,
+          })
+        : Promise.resolve([]),
+      documentWhere
+        ? this.prisma.operationsRecord
+            .findMany({
+              where: documentWhere,
+              orderBy,
+              select: { recordId: true },
+            })
+            .then((rows) =>
+              this.documentsWithoutFiles(rows.map((row) => row.recordId)),
+            )
+        : Promise.resolve(null),
+    ]);
+    const result: Record<string, Prisma.JsonValue[]> = Object.fromEntries(
+      domains.map((domain) => [domain, []]),
+    );
+    for (const record of records) {
+      const domain = record.domain as OperationsDomain;
+      result[domain]?.push(this.listItem(domain, record, actor));
+    }
+    if (documents) result.documents = documents;
+    return result;
   }
 
   async get(domainName: string, recordId: string, actor: OperationsActor) {
@@ -479,6 +638,7 @@ export class OperationsService {
     };
     const data = this.normalizeData(domain, input, actor);
     await this.assertDriverDocumentSubmission(domain, actor, data);
+    const truckOwner = await this.truckOwnerFor(domain, data, actor);
     if (domain === 'cargo-requests') {
       this.validateCargoRequest(data, dto.draft === true);
     }
@@ -488,7 +648,11 @@ export class OperationsService {
     }
     const ownerField = DOMAIN_OWNER_FIELDS[domain];
     const ownerId =
-      actor.role === UserRole.ADMIN && ownerField ? data[ownerField] : actor.id;
+      domain === 'truck-profiles'
+        ? truckOwner
+        : actor.role === UserRole.ADMIN && ownerField
+          ? data[ownerField]
+          : actor.id;
     if (ownerId !== undefined && typeof ownerId !== 'string') {
       throw new BadRequestException('Record owner id must be a string.');
     }
@@ -1296,11 +1460,17 @@ export class OperationsService {
       where: { domain_recordId: { domain, recordId } },
     });
     if (!existing) throw new NotFoundException('Operations record not found.');
-    this.assertOwner(existing, actor);
+    // A truck profile belongs to whoever owns the truck now; that is checked below.
+    if (domain !== 'truck-profiles') this.assertOwner(existing, actor);
     if (domain === 'drivers') {
       return this.updateDriverRecord(recordId, existing, dto);
     }
-    const data = this.normalizeData(domain, dto.data, actor, recordId);
+    let data = this.normalizeData(domain, dto.data, actor, recordId);
+    if (domain === 'documents') data = this.keepStoredFile(data, existing.data);
+    if (domain === 'truck-profiles' && existing.truckId) {
+      data.truckId = existing.truckId;
+    }
+    const truckOwner = await this.truckOwnerFor(domain, data, actor);
     if (domain === 'cargo-requests') {
       const current = this.recordData(existing.data);
       if (
@@ -1357,6 +1527,7 @@ export class OperationsService {
         ...(actor.role === UserRole.ADMIN && ownerField
           ? { ownerId: typeof ownerValue === 'string' ? ownerValue : null }
           : {}),
+        ...(domain === 'truck-profiles' ? { ownerId: truckOwner } : {}),
       },
     });
     return updated.data;
@@ -1414,6 +1585,7 @@ export class OperationsService {
     try {
       const updated = await this.prisma.$transaction(async (transaction) => {
         if (typeof data.userId === 'string') {
+          this.sessions.invalidate(data.userId);
           await transaction.user.update({
             where: { id: data.userId },
             data: {

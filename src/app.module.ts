@@ -10,6 +10,7 @@ import { BookingsModule } from './bookings/bookings.module';
 import { DisputesModule } from './disputes/disputes.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OperationsModule } from './operations/operations.module';
+import { ReviewsModule } from './reviews/reviews.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { OperationsModule } from './operations/operations.module';
     DisputesModule,
     PaymentsModule,
     OperationsModule,
+    ReviewsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

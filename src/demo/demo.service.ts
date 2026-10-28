@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma, TruckStatus, UserRole } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../prisma/prisma.service';
+import { UserSessionCache } from '../prisma/user-session-cache';
 
 const DEMO_PASSWORD = 'demo1234';
 
@@ -120,11 +121,15 @@ const DEMO_TRUCKS = [
 
 @Injectable()
 export class DemoService {
-  constructor(private prisma: PrismaService) {}
+  constructor(
+    private prisma: PrismaService,
+    private sessions: UserSessionCache = new UserSessionCache(),
+  ) {}
 
   async reset() {
     const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
 
+    this.sessions.clear();
     await this.prisma.$transaction([
       this.prisma.dispute.deleteMany(),
       this.prisma.booking.deleteMany(),

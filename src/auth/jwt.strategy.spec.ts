@@ -1,5 +1,6 @@
 import { UnauthorizedException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { UserSessionCache } from '../prisma/user-session-cache';
 import { JwtStrategy } from './jwt.strategy';
 
 describe('JwtStrategy', () => {
@@ -12,7 +13,7 @@ describe('JwtStrategy', () => {
         }),
       },
     } as unknown as PrismaService;
-    const strategy = new JwtStrategy(prisma);
+    const strategy = new JwtStrategy(prisma, new UserSessionCache());
 
     await expect(
       strategy.validate({

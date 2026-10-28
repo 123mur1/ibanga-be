@@ -15,7 +15,7 @@ import { CreateDisputeDto } from './dto/create-dispute.dto';
 
 type Actor = { id: string; role: UserRole };
 const INCLUDE = {
-  booking: { include: { truck: true } },
+  booking: { include: { truck: { omit: { photos: true } } } },
 } satisfies Prisma.DisputeInclude;
 
 @Injectable()

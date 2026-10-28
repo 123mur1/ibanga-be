@@ -396,4 +396,57 @@ describe('OperationsService', () => {
       }),
     ).rejects.toThrow('This operations domain does not allow record deletion.');
   });
+
+  describe('truck documents', () => {
+    const owner = { id: 'owner-1', role: UserRole.TRUCK_OWNER };
+    const admin = { id: 'admin-1', role: UserRole.ADMIN };
+    const storedData = () =>
+      (
+        prisma.operationsRecord.create.mock.calls[0] as [
+          { data: { ownerId: string | null; data: Record<string, JsonValue> } },
+        ]
+      )[0].data;
+
+    beforeEach(() => {
+      prisma.truck.findUnique.mockResolvedValue({ ownerId: owner.id });
+      prisma.operationsRecord.create.mockImplementation(
+        (args: { data: { data: Record<string, JsonValue> } }) =>
+          Promise.resolve({ data: args.data.data }),
+      );
+    });
+
+    it('keeps an owner submission pending even when it claims to be approved', async () => {
+      await service.create('documents', owner, {
+        data: {
+          id: 'doc-1',
+          subjectKind: 'TRUCK',
+          subjectId: 'truck-1',
+          type: 'INSURANCE_POLICY',
+          status: 'APPROVED',
+          reviewedBy: owner.id,
+        },
+      });
+
+      expect(storedData().data).toMatchObject({ status: 'PENDING' });
+      expect(storedData().data).not.toHaveProperty('reviewedBy');
+    });
+
+    it('refuses documents for another owner’s truck', async () => {
+      prisma.truck.findUnique.mockResolvedValue({ ownerId: 'someone-else' });
+
+      await expect(
+        service.create('documents', owner, {
+          data: { id: 'doc-2', subjectKind: 'TRUCK', subjectId: 'truck-9' },
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+    });
+
+    it('records a truck profile as the truck owner’s when an administrator creates it', async () => {
+      await service.create('truck-profiles', admin, {
+        data: { id: 'tp-truck-1', truckId: 'truck-1', verification: 'APPROVED' },
+      });
+
+      expect(storedData().ownerId).toBe(owner.id);
+    });
+  });
 });

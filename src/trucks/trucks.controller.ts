@@ -4,10 +4,12 @@ import {
   Delete,
   Get,
   Param,
+  ParseIntPipe,
   Patch,
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { UserRole } from '@prisma/client';
@@ -19,14 +21,20 @@ import { CreateTruckDto } from './dto/create-truck.dto';
 import { QueryTrucksDto } from './dto/query-trucks.dto';
 import { UpdateAvailabilityDto } from './dto/update-availability.dto';
 import { UpdateTruckDto } from './dto/update-truck.dto';
+import type { Response } from 'express';
+import { sendImage } from '../common/data-url';
 import { TrucksService } from './trucks.service';
+import { TruckPhotos } from './truck-photos';
 
 type AuthedRequest = { user: { id: string; role: UserRole } };
 type MaybeAuthedRequest = { user?: { id: string; role: UserRole } };
 
 @Controller('trucks')
 export class TrucksController {
-  constructor(private trucks: TrucksService) {}
+  constructor(
+    private trucks: TrucksService,
+    private photos: TruckPhotos,
+  ) {}
 
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.TRUCK_OWNER)
@@ -39,6 +47,17 @@ export class TrucksController {
   @Get()
   findAll(@Req() req: MaybeAuthedRequest, @Query() query: QueryTrucksDto) {
     return this.trucks.findAll(req.user?.id, req.user?.role, query);
+  }
+
+  /** One truck photo as an image. The `v` query (last update time) makes the URL cacheable. */
+  @Get(':id/photos/:index')
+  async photo(
+    @Param('id') id: string,
+    @Param('index', ParseIntPipe) index: number,
+    @Query('v') version: string | undefined,
+    @Res() res: Response,
+  ) {
+    sendImage(res, await this.photos.photo(id, index, version ?? ''), version);
   }
 
   @Get(':id')

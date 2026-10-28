@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import compression from 'compression';
 import express, { type Express } from 'express';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
@@ -23,6 +24,7 @@ async function bootstrap() {
     credentials: true,
   });
   const server = app.getHttpAdapter().getInstance() as Express;
+  server.use(compression());
   server.use(express.json({ limit: '10mb' }));
   app.useGlobalPipes(
     new ValidationPipe({
