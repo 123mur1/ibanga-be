@@ -337,6 +337,12 @@ export class OperationsService {
         where.status = { not: 'WITHDRAWN' };
       } else if (domain === 'drivers' && actor.role === UserRole.DRIVER) {
         where.data = { path: ['userId'], equals: actor.id };
+      } else if (domain === 'shipments') {
+        where.OR = [
+          { ownerId: actor.id },
+          { data: { path: ['ownerId'], equals: actor.id } },
+          { data: { path: ['importerId'], equals: actor.id } },
+        ];
       } else if (
         PUBLIC_READ_DOMAINS.has(domain) ||
         domain === 'announcements'
@@ -373,7 +379,16 @@ export class OperationsService {
       this.prisma.operationsRecord.count({ where }),
     ]);
     return {
-      items: records.map((record) => record.data),
+      items: records.map((record) => {
+        if (
+          (domain === 'shipments' || domain === 'settlements') &&
+          actor.role === UserRole.TRUCK_OWNER &&
+          record.ownerId === actor.id
+        ) {
+          return { ...this.recordData(record.data), ownerId: actor.id };
+        }
+        return record.data;
+      }),
       total,
       page,
       pageSize,
@@ -478,25 +493,39 @@ export class OperationsService {
       throw new BadRequestException('Record owner id must be a string.');
     }
     try {
-      const record = await this.prisma.operationsRecord.create({
-        data: {
-          domain,
-          recordId,
-          ownerId: ownerId ?? null,
-          audience:
-            domain === 'announcements' && typeof data.audience === 'string'
-              ? data.audience
-              : null,
-          parentId:
-            typeof data.cargoRequestId === 'string'
-              ? data.cargoRequestId
-              : null,
-          status: typeof data.status === 'string' ? data.status : null,
-          truckId: typeof data.truckId === 'string' ? data.truckId : null,
-          searchText: this.extractSearchText(data),
-          data,
-        },
-      });
+      const parentId =
+        (domain === 'shipments' || domain === 'settlements') &&
+        typeof data.bookingId === 'string'
+          ? data.bookingId
+          : typeof data.cargoRequestId === 'string'
+            ? data.cargoRequestId
+            : null;
+      const recordData = {
+        domain,
+        recordId,
+        ownerId: ownerId ?? null,
+        audience:
+          domain === 'announcements' && typeof data.audience === 'string'
+            ? data.audience
+            : null,
+        parentId,
+        status: typeof data.status === 'string' ? data.status : null,
+        truckId: typeof data.truckId === 'string' ? data.truckId : null,
+        searchText: this.extractSearchText(data),
+        data,
+      };
+      const record =
+        domain === 'shipments' || domain === 'settlements'
+          ? await this.prisma.operationsRecord.upsert({
+              where: { domain_recordId: { domain, recordId } },
+              create: recordData,
+              update: {
+                ownerId: ownerId ?? null,
+                parentId,
+                truckId: recordData.truckId,
+              },
+            })
+          : await this.prisma.operationsRecord.create({ data: recordData });
       return record.data;
     } catch (error) {
       if (

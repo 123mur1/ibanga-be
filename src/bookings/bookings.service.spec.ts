@@ -24,6 +24,7 @@ describe('BookingsService', () => {
       bookingPayment: { findUnique: jest.fn() },
       operationsRecord: {
         createMany: jest.fn().mockResolvedValue({ count: 2 }),
+        upsert: jest.fn().mockResolvedValue({ data: {} }),
       },
       $queryRaw: jest.fn(),
     };
@@ -190,6 +191,48 @@ describe('BookingsService', () => {
           }),
         }),
       ]),
+    );
+  });
+
+  it('creates an API-owned shipment when the truck owner accepts a booking', async () => {
+    const booking = {
+      id: 'booking-1',
+      importerId: importer.id,
+      truckId: 'truck-1',
+      truck: { ownerId: owner.id },
+      status: BookingStatus.PENDING,
+      agreedPriceRwf: 80000,
+      expectedDeliveryDate: new Date('2030-01-02T10:00:00Z'),
+      createdAt: new Date('2030-01-01T10:00:00Z'),
+    };
+    prisma.booking.findUnique.mockResolvedValue(booking);
+    prisma.booking.update.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.ACCEPTED,
+    });
+
+    await service.update(owner, booking.id, {
+      status: BookingStatus.ACCEPTED,
+    });
+
+    expect(prisma.operationsRecord.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          domain_recordId: { domain: 'shipments', recordId: 'sh-booking-1' },
+        },
+        create: expect.objectContaining({
+          domain: 'shipments',
+          ownerId: owner.id,
+          parentId: booking.id,
+          status: 'SCHEDULED',
+          data: expect.objectContaining({
+            bookingId: booking.id,
+            importerId: importer.id,
+            ownerId: owner.id,
+          }),
+        }),
+        update: {},
+      }),
     );
   });
 });

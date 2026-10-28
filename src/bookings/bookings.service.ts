@@ -296,6 +296,12 @@ export class BookingsService {
       include: BOOKING_INCLUDE,
     });
     if (
+      dto.status === BookingStatus.ACCEPTED &&
+      booking.status !== BookingStatus.ACCEPTED
+    ) {
+      await this.ensureShipmentRecord(updated);
+    }
+    if (
       dto.status === BookingStatus.REJECTED ||
       dto.status === BookingStatus.COMPLETED
     ) {
@@ -359,6 +365,56 @@ export class BookingsService {
       );
     }
     return updated;
+  }
+
+  private async ensureShipmentRecord(booking: {
+    id: string;
+    truckId: string;
+    importerId: string;
+    expectedDeliveryDate: Date;
+    createdAt: Date;
+    cargoRequestId?: string | null;
+    driverId?: string | null;
+    truck: { ownerId: string };
+  }) {
+    const shipmentId = `sh-${booking.id}`;
+    const createdAt = booking.createdAt.toISOString();
+    const data = {
+      id: shipmentId,
+      ref: `SHP-${new Date().getFullYear()}-${booking.id
+        .replace(/[^a-z0-9]/gi, '')
+        .slice(-8)
+        .toUpperCase()}`,
+      bookingId: booking.id,
+      ...(booking.cargoRequestId
+        ? { cargoRequestId: booking.cargoRequestId }
+        : {}),
+      ownerId: booking.truck.ownerId,
+      importerId: booking.importerId,
+      truckId: booking.truckId,
+      ...(booking.driverId ? { driverId: booking.driverId } : {}),
+      status: 'SCHEDULED',
+      etaDate: booking.expectedDeliveryDate.toISOString(),
+      milestones: [],
+      createdAt,
+    };
+
+    await this.prisma.operationsRecord.upsert({
+      where: {
+        domain_recordId: { domain: 'shipments', recordId: shipmentId },
+      },
+      create: {
+        domain: 'shipments',
+        recordId: shipmentId,
+        ownerId: booking.truck.ownerId,
+        parentId: booking.id,
+        status: 'SCHEDULED',
+        truckId: booking.truckId,
+        searchText: `${data.ref} ${booking.id} ${booking.truckId}`,
+        data,
+      },
+      update: {},
+    });
   }
 
   private notifyUsers(

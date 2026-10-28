@@ -66,6 +66,7 @@ export const DOMAIN_WRITE_ROLES: Partial<
   ],
   'driver-assignments': [UserRole.TRUCK_OWNER],
   'truck-profiles': [UserRole.TRUCK_OWNER],
+  shipments: [UserRole.TRUCK_OWNER],
   settlements: [UserRole.TRUCK_OWNER],
   payouts: [UserRole.TRUCK_OWNER],
   'insurance-policies': [UserRole.TRUCK_OWNER],

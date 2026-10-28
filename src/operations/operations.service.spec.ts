@@ -20,6 +20,7 @@ describe('OperationsService', () => {
     };
     operationsRecord: {
       create: jest.Mock;
+      upsert: jest.Mock;
       findUnique: jest.Mock;
       findMany: jest.Mock;
       findFirst: jest.Mock;
@@ -42,6 +43,9 @@ describe('OperationsService', () => {
       },
       operationsRecord: {
         create: jest.fn(),
+        upsert: jest.fn().mockImplementation((args: {
+          create: { data: Record<string, JsonValue> };
+        }) => Promise.resolve({ data: args.create.data })),
         findUnique: jest.fn(),
         findMany: jest.fn(),
         findFirst: jest.fn(),
@@ -107,6 +111,41 @@ describe('OperationsService', () => {
     expect(storedInput.searchText).toContain(
       'cargo-1 importer-1 Cargo DRAFT CR-',
     );
+  });
+
+  it('upserts derived shipments by stable id and booking id', async () => {
+    const ownerActor = { id: 'owner-1', role: UserRole.TRUCK_OWNER };
+    const shipment = {
+      id: 'sh-booking-1',
+      bookingId: 'booking-1',
+      ownerId: ownerActor.id,
+      importerId: actor.id,
+      truckId: 'truck-1',
+      status: 'SCHEDULED',
+    };
+
+    await service.create('shipments', ownerActor, { data: shipment });
+
+    expect(prisma.operationsRecord.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          domain_recordId: {
+            domain: 'shipments',
+            recordId: shipment.id,
+          },
+        },
+        create: expect.objectContaining({
+          domain: 'shipments',
+          ownerId: ownerActor.id,
+          parentId: shipment.bookingId,
+        }),
+        update: expect.objectContaining({
+          ownerId: ownerActor.id,
+          parentId: shipment.bookingId,
+        }),
+      }),
+    );
+    expect(prisma.operationsRecord.create).not.toHaveBeenCalled();
   });
 
   it('lets a driver submit documents only for the driver profile linked to their login', async () => {
