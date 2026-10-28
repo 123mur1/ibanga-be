@@ -9,5 +9,6 @@ import { BookingsService } from './bookings.service';
   imports: [PrismaModule, PaymentsModule, TrucksModule],
   controllers: [BookingsController],
   providers: [BookingsService],
+  exports: [BookingsService],
 })
 export class BookingsModule {}

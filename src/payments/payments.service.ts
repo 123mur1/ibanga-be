@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -9,6 +10,7 @@ import {
 import {
   BookingPaymentStatus,
   BookingStatus,
+  Prisma,
   WalletTransactionDirection,
   WalletTransactionStatus,
   WalletTransactionType,
@@ -413,6 +415,136 @@ export class PaymentsService {
       currency: 'RWF',
       monthlyHistory,
     };
+  }
+
+  /**
+   * Settles a payment held in escrow by an administrator's dispute decision. `refundRwf` goes back
+   * to the importer's wallet; the rest is released to the owner, less the platform commission on
+   * that part only (no commission is kept on refunded money). Everything happens in one
+   * transaction, together with `closeBooking`, so money never moves without the booking closing.
+   */
+  async settleHeldPayment(
+    bookingId: string,
+    refundRwf: number,
+    closeBooking: (transaction: Prisma.TransactionClient) => Promise<void>,
+  ) {
+    const admin = await this.prisma.user.findFirst({
+      where: { role: 'ADMIN' },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true },
+    });
+    if (!admin) {
+      throw new ServiceUnavailableException(
+        'Create an admin account before settling booking payments.',
+      );
+    }
+    return this.prisma.$transaction(async (transaction) => {
+      const payment = await transaction.bookingPayment.findUnique({
+        where: { bookingId },
+        include: {
+          booking: {
+            select: { importerId: true, truck: { select: { ownerId: true } } },
+          },
+        },
+      });
+      if (!payment || payment.status !== BookingPaymentStatus.FUNDED) {
+        throw new BadRequestException(
+          'This booking has no payment held in escrow to settle.',
+        );
+      }
+      if (
+        !Number.isInteger(refundRwf) ||
+        refundRwf < 0 ||
+        refundRwf > payment.amountRwf
+      ) {
+        throw new BadRequestException(
+          `The refund must be a whole amount from 0 to ${payment.amountRwf} RWF.`,
+        );
+      }
+      const ownerGrossRwf = payment.amountRwf - refundRwf;
+      // Same commission rate as when the importer paid, applied to the owner's part only.
+      const commissionRwf = Math.round(
+        (payment.commissionRwf * ownerGrossRwf) / payment.amountRwf,
+      );
+      const ownerAmountRwf = ownerGrossRwf - commissionRwf;
+      const fullRefund = ownerGrossRwf === 0;
+
+      // Claim the held payment first, so a second settlement, or the importer confirming receipt
+      // at the same moment, cannot pay it out again.
+      const claimed = await transaction.bookingPayment.updateMany({
+        where: { bookingId, status: BookingPaymentStatus.FUNDED },
+        data: {
+          status: fullRefund
+            ? BookingPaymentStatus.REFUNDED
+            : BookingPaymentStatus.RELEASED,
+          commissionRwf,
+          ownerAmountRwf,
+          releasedAt: fullRefund ? null : new Date(),
+        },
+      });
+      if (claimed.count !== 1) {
+        throw new ConflictException('This payment has just been settled.');
+      }
+
+      const credit = async (
+        userId: string,
+        amountRwf: number,
+        type: WalletTransactionType,
+        reference: string,
+        description: string,
+      ) => {
+        if (amountRwf <= 0) return;
+        const wallet = await transaction.wallet.upsert({
+          where: { userId },
+          create: { userId, balanceRwf: amountRwf },
+          update: { balanceRwf: { increment: amountRwf } },
+        });
+        await transaction.walletTransaction.create({
+          data: {
+            walletId: wallet.id,
+            bookingId,
+            type,
+            status: WalletTransactionStatus.SUCCEEDED,
+            direction: WalletTransactionDirection.CREDIT,
+            amountRwf,
+            reference,
+            description,
+          },
+        });
+      };
+      await credit(
+        payment.booking.importerId,
+        refundRwf,
+        WalletTransactionType.REFUND,
+        `ibanga-refund-${bookingId}`,
+        fullRefund
+          ? 'Booking payment refunded after a dispute'
+          : 'Partial refund after a dispute',
+      );
+      await credit(
+        payment.booking.truck.ownerId,
+        ownerAmountRwf,
+        WalletTransactionType.BOOKING_EARNING,
+        `ibanga-release-${bookingId}`,
+        refundRwf
+          ? 'Booking proceeds released after a dispute (part refunded)'
+          : 'Booking proceeds released after a dispute',
+      );
+      await credit(
+        admin.id,
+        commissionRwf,
+        WalletTransactionType.PLATFORM_COMMISSION,
+        `ibanga-commission-${bookingId}`,
+        'iBanga booking commission',
+      );
+      await closeBooking(transaction);
+      return {
+        amountRwf: payment.amountRwf,
+        refundRwf,
+        ownerAmountRwf,
+        commissionRwf,
+      };
+    });
   }
 
   private async getOrCreateWallet(userId: string) {

@@ -11,6 +11,7 @@ import { DisputesModule } from './disputes/disputes.module';
 import { PaymentsModule } from './payments/payments.module';
 import { OperationsModule } from './operations/operations.module';
 import { ReviewsModule } from './reviews/reviews.module';
+import { RefundsModule } from './refunds/refunds.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { ReviewsModule } from './reviews/reviews.module';
     PaymentsModule,
     OperationsModule,
     ReviewsModule,
+    RefundsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

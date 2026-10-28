@@ -43,6 +43,8 @@ export const ADMIN_WRITE_DOMAINS: ReadonlySet<OperationsDomain> = new Set([
   // Importers post reviews through POST /trucks/:id/reviews, which checks they shipped with the
   // truck. Through this generic API only an administrator may change them (moderation).
   'reviews',
+  // Refund requests go through /refunds, which checks the booking and moves the money on approval.
+  'refunds',
 ]);
 
 export const PUBLIC_READ_DOMAINS: ReadonlySet<OperationsDomain> = new Set([
@@ -74,7 +76,6 @@ export const DOMAIN_WRITE_ROLES: Partial<
   payouts: [UserRole.TRUCK_OWNER],
   'insurance-policies': [UserRole.TRUCK_OWNER],
   'insurance-claims': [UserRole.TRUCK_OWNER],
-  refunds: [UserRole.IMPORTER],
 };
 
 export const DOMAIN_OWNER_FIELDS: Partial<Record<OperationsDomain, string>> = {

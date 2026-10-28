@@ -14,6 +14,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
+import { SettleDisputeDto } from './dto/settle-dispute.dto';
 import { UpdateTrackingLocationDto } from './dto/update-tracking-location.dto';
 
 type AuthedRequest = { user: { id: string; role: UserRole } };
@@ -55,6 +56,16 @@ export class BookingsController {
   @Delete(':id/location')
   clearTrackingLocation(@Req() req: AuthedRequest, @Param('id') id: string) {
     return this.bookings.clearTrackingLocation(req.user, id);
+  }
+
+  /** Administrator decision on a disputed booking: refund the importer, pay the owner, or split. */
+  @Post(':id/settle-dispute')
+  settleDispute(
+    @Req() req: AuthedRequest,
+    @Param('id') id: string,
+    @Body() dto: SettleDisputeDto,
+  ) {
+    return this.bookings.settleDispute(req.user, id, dto);
   }
 
   @Patch(':id')

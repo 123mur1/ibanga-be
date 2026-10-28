@@ -4,12 +4,8 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  BookingStatus,
-  DisputeStatus,
-  Prisma,
-  UserRole,
-} from '@prisma/client';
+import { BookingStatus, DisputeStatus, Prisma, UserRole } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 
@@ -30,6 +26,7 @@ export class DisputesService {
     }
     const booking = await this.prisma.booking.findUnique({
       where: { id: dto.bookingId },
+      include: { truck: { select: { ownerId: true, plateNumber: true } } },
     });
     if (!booking) throw new NotFoundException('Booking not found.');
     if (booking.importerId !== actor.id)
@@ -53,7 +50,61 @@ export class DisputesService {
       where: { id: booking.id },
       data: { status: BookingStatus.DISPUTED },
     });
+    await this.notifyReported(booking, dispute.reason);
     return dispute;
+  }
+
+  /** Tells every administrator (who decides it) and the truck owner that a problem was reported. */
+  private async notifyReported(
+    booking: {
+      id: string;
+      pickupLocation: string;
+      destination: string;
+      truck: { ownerId: string; plateNumber: string };
+    },
+    reason: string,
+  ) {
+    const admins = await this.prisma.user.findMany({
+      where: { role: UserRole.ADMIN, active: true },
+      select: { id: true },
+    });
+    const route = `${booking.pickupLocation} to ${booking.destination}`;
+    const createdAt = new Date().toISOString();
+    const notices = [
+      ...admins.map((admin) => ({
+        userId: admin.id,
+        title: 'Importer reported a problem',
+        body: `${route} (${booking.truck.plateNumber}): "${reason}". The payment stays in escrow until you settle the dispute.`,
+        href: `/dashboard/admin/bookings/${booking.id}`,
+      })),
+      {
+        userId: booking.truck.ownerId,
+        title: 'Importer reported a problem',
+        body: `The importer reported a problem with ${route}: "${reason}". An administrator will decide the dispute.`,
+        href: `/dashboard/owner/bookings/${booking.id}`,
+      },
+    ];
+    await this.prisma.operationsRecord.createMany({
+      data: notices.map(({ userId, title, body, href }) => {
+        const id = randomUUID();
+        return {
+          domain: 'notifications',
+          recordId: id,
+          ownerId: userId,
+          searchText: `${title} ${body}`,
+          data: {
+            id,
+            userId,
+            category: 'DISPUTE',
+            title,
+            body,
+            href,
+            read: false,
+            createdAt,
+          },
+        };
+      }),
+    });
   }
 
   findAll(actor: Actor) {

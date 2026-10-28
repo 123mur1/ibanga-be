@@ -10,6 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PaymentsService } from '../payments/payments.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
+import { SettleDisputeDto } from './dto/settle-dispute.dto';
 import { UpdateTrackingLocationDto } from './dto/update-tracking-location.dto';
 import { TruckPhotos } from '../trucks/truck-photos';
 import { verificationByTruck } from '../trucks/truck-verification';
@@ -385,6 +386,120 @@ export class BookingsService {
       );
     }
     return updated;
+  }
+
+  /**
+   * An administrator settles a disputed booking. The held payment is refunded to the importer in
+   * full or in part, and whatever is not refunded is released to the owner. The booking is then
+   * closed, its truck freed and the dispute marked resolved.
+   */
+  async settleDispute(actor: Actor, id: string, dto: SettleDisputeDto) {
+    if (actor.role !== UserRole.ADMIN) {
+      throw new ForbiddenException(
+        'Only an administrator can settle a dispute.',
+      );
+    }
+    const booking = await this.findOne(actor, id);
+    const openCase = await this.prisma.operationsRecord.count({
+      where: {
+        domain: 'dispute-cases',
+        data: { path: ['bookingId'], equals: id },
+        NOT: { status: { in: ['RESOLVED', 'REJECTED'] } },
+      },
+    });
+    if (booking.status !== BookingStatus.DISPUTED && !openCase) {
+      throw new BadRequestException(
+        'Only a booking under dispute can be settled this way.',
+      );
+    }
+    const settlement = await this.payments.settleHeldPayment(
+      id,
+      dto.refundRwf,
+      async (transaction) => {
+        await transaction.booking.update({
+          where: { id },
+          data: {
+            status: BookingStatus.COMPLETED,
+            trackingLatitude: null,
+            trackingLongitude: null,
+            trackingAccuracy: null,
+            trackingUpdatedAt: null,
+          },
+        });
+        await transaction.truck.update({
+          where: { id: booking.truckId },
+          data: { status: TruckStatus.AVAILABLE },
+        });
+        await transaction.dispute.updateMany({
+          where: { bookingId: id, status: 'OPEN' },
+          data: {
+            status: 'RESOLVED',
+            resolutionNotes: dto.resolutionNotes,
+            resolvedAt: new Date(),
+          },
+        });
+        await this.closeRefundRequests(transaction, actor, id, dto);
+      },
+    );
+
+    const rwf = (amount: number) => `${amount.toLocaleString('en-US')} RWF`;
+    const outcome =
+      settlement.refundRwf === settlement.amountRwf
+        ? 'refunded in full'
+        : settlement.refundRwf
+          ? `settled: ${rwf(settlement.refundRwf)} refunded, the rest paid to the owner`
+          : 'released to the truck owner';
+    await this.notifyUsers(
+      [
+        {
+          userId: booking.importerId,
+          role: UserRole.IMPORTER,
+          title: settlement.refundRwf
+            ? 'Refund issued after your dispute'
+            : 'Dispute decided',
+          body: settlement.refundRwf
+            ? `${rwf(settlement.refundRwf)} for booking ${id} was returned to your iBanga wallet. ${dto.resolutionNotes}`
+            : `The payment for booking ${id} was ${outcome}. ${dto.resolutionNotes}`,
+        },
+        {
+          userId: booking.truck.ownerId,
+          role: UserRole.TRUCK_OWNER,
+          title: 'Dispute decided',
+          body: `The payment for booking ${id} was ${outcome}. ${dto.resolutionNotes}`,
+        },
+      ],
+      id,
+    );
+    return { ...settlement, booking: await this.findOne(actor, id) };
+  }
+
+  /** A settled dispute answers any refund request still waiting on the booking. */
+  private async closeRefundRequests(
+    transaction: Prisma.TransactionClient,
+    actor: Actor,
+    bookingId: string,
+    dto: SettleDisputeDto,
+  ) {
+    const pending = await transaction.operationsRecord.findMany({
+      where: { domain: 'refunds', parentId: bookingId, status: 'REQUESTED' },
+    });
+    const approved = dto.refundRwf > 0;
+    for (const record of pending) {
+      const data = {
+        ...(record.data as Prisma.JsonObject),
+        status: approved ? 'APPROVED' : 'REJECTED',
+        decisionNote: dto.resolutionNotes,
+        decidedBy: actor.id,
+        resolvedAt: new Date().toISOString(),
+        ...(approved
+          ? { approvedAmountRwf: dto.refundRwf, payoutState: 'COMPLETED' }
+          : {}),
+      };
+      await transaction.operationsRecord.update({
+        where: { id: record.id },
+        data: { status: data.status, data },
+      });
+    }
   }
 
   private async ensureShipmentRecord(booking: {
