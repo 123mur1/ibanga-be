@@ -1,4 +1,7 @@
 {
   "extends": "./tsconfig.json",
+  // Only the app goes into dist, so the entry point is dist/main.js (what `start:prod` runs).
+  // prisma/seed.ts runs separately through ts-node.
+  "include": ["src"],
   "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
 }

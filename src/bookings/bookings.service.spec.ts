@@ -46,6 +46,8 @@ describe('BookingsService', () => {
       operationsRecord: {
         createMany: jest.fn().mockResolvedValue({ count: 2 }),
         upsert: jest.fn().mockResolvedValue({ data: {} }),
+        findUnique: jest.fn().mockResolvedValue(null),
+        update: jest.fn(),
       },
       $queryRaw: jest.fn(),
     };
@@ -202,6 +204,9 @@ describe('BookingsService', () => {
       status: BookingStatus.ACCEPTED,
       agreedPriceRwf: 80000,
       payment: { status: 'FUNDED' },
+      destination: 'Musanze',
+      expectedDeliveryDate: new Date('2030-01-02T10:00:00Z'),
+      createdAt: new Date('2030-01-01T10:00:00Z'),
     };
     prisma.booking.findUnique.mockResolvedValue(booking);
     prisma.bookingPayment.findUnique.mockResolvedValue({ status: 'FUNDED' });
@@ -272,5 +277,75 @@ describe('BookingsService', () => {
         update: {},
       }),
     );
+  });
+
+  describe('keeps the shipment in step with the booking', () => {
+    const booking = {
+      id: 'booking-1',
+      importerId: importer.id,
+      truckId: 'truck-1',
+      truck: { ownerId: owner.id },
+      status: BookingStatus.DELIVERED,
+      destination: 'Musanze',
+      payment: { status: 'FUNDED' },
+      expectedDeliveryDate: new Date('2030-01-02T10:00:00Z'),
+      createdAt: new Date('2030-01-01T10:00:00Z'),
+    };
+    const shipmentRecord = (status: string) => ({
+      id: 'record-1',
+      data: { id: 'sh-booking-1', status, milestones: [] },
+    });
+
+    beforeEach(() => {
+      prisma.booking.findUnique.mockResolvedValue(booking);
+      prisma.bookingPayment.findUnique.mockResolvedValue({ status: 'FUNDED' });
+    });
+
+    it('completes the shipment when the importer confirms receipt', async () => {
+      prisma.booking.update.mockResolvedValue({
+        ...booking,
+        status: BookingStatus.COMPLETED,
+      });
+      prisma.operationsRecord.findUnique.mockResolvedValue(
+        shipmentRecord('ARRIVED'),
+      );
+
+      await service.update(importer, booking.id, {
+        status: BookingStatus.COMPLETED,
+      });
+
+      expect(prisma.operationsRecord.update).toHaveBeenCalledWith({
+        where: { id: 'record-1' },
+        data: {
+          status: 'COMPLETED',
+          data: expect.objectContaining({
+            status: 'COMPLETED',
+            milestones: [
+              expect.objectContaining({ kind: 'DELIVERED', place: 'Musanze' }),
+            ],
+          }),
+        },
+      });
+    });
+
+    it('never moves a shipment backwards', async () => {
+      prisma.booking.findUnique.mockResolvedValue({
+        ...booking,
+        status: BookingStatus.ACCEPTED,
+      });
+      prisma.booking.update.mockResolvedValue({
+        ...booking,
+        status: BookingStatus.IN_PROGRESS,
+      });
+      prisma.operationsRecord.findUnique.mockResolvedValue(
+        shipmentRecord('UNLOADING'),
+      );
+
+      await service.update(owner, booking.id, {
+        status: BookingStatus.IN_PROGRESS,
+      });
+
+      expect(prisma.operationsRecord.update).not.toHaveBeenCalled();
+    });
   });
 });

@@ -60,9 +60,10 @@ export class TrucksController {
     sendImage(res, await this.photos.photo(id, index, version ?? ''), version);
   }
 
+  @UseGuards(OptionalJwtAuthGuard)
   @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.trucks.findOne(id);
+  findOne(@Req() req: MaybeAuthedRequest, @Param('id') id: string) {
+    return this.trucks.findOne(id, req.user);
   }
 
   @UseGuards(JwtAuthGuard, RolesGuard)

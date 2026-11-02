@@ -74,10 +74,15 @@ export class TrucksService {
       this.truckPhotos.withCovers(trucks),
       this.withVerification(trucks),
     ]);
-    return withCovers.map((truck, index) => ({
+    const listed = withCovers.map((truck, index) => ({
       ...truck,
       verification: withStatus[index].verification,
     }));
+    // The marketplace shows importers and visitors verified trucks only. Administrators see every
+    // truck, and owners see their whole fleet (`mine`) so they can finish verification.
+    return userRole === UserRole.ADMIN || query.mine
+      ? listed
+      : listed.filter((truck) => truck.verification === 'APPROVED');
   }
 
   private findTrucks(
@@ -121,13 +126,19 @@ export class TrucksService {
     });
   }
 
-  async findOne(id: string) {
+  /** One truck. Unverified trucks are visible only to their owner and administrators. */
+  async findOne(id: string, viewer?: { id: string; role: UserRole }) {
     const truck = await this.prisma.truck.findUnique({
       where: { id },
       include: TRUCK_INCLUDE,
     });
     if (!truck) throw new NotFoundException('Truck not found.');
     const [withStatus] = await this.withVerification([truck]);
+    const canSeeUnverified =
+      viewer?.role === UserRole.ADMIN || viewer?.id === truck.ownerId;
+    if (withStatus.verification !== 'APPROVED' && !canSeeUnverified) {
+      throw new NotFoundException('Truck not found.');
+    }
     return withStatus;
   }
 

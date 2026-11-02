@@ -19,6 +19,37 @@ import {
 } from '../trucks/truck-verification';
 
 type Actor = { id: string; role: UserRole };
+
+type ShipmentSource = {
+  id: string;
+  truckId: string;
+  importerId: string;
+  expectedDeliveryDate: Date;
+  createdAt: Date;
+  cargoRequestId?: string | null;
+  driverId?: string | null;
+  truck: { ownerId: string };
+};
+
+/** The shipment step each booking status implies; the frontend uses the same order. */
+const SHIPMENT_STEP_FOR_BOOKING: Partial<Record<BookingStatus, string>> = {
+  [BookingStatus.ACCEPTED]: 'SCHEDULED',
+  [BookingStatus.IN_PROGRESS]: 'IN_TRANSIT',
+  [BookingStatus.DELIVERED]: 'ARRIVED',
+  [BookingStatus.COMPLETED]: 'COMPLETED',
+};
+const SHIPMENT_ORDER = [
+  'SCHEDULED',
+  'PICKUP_CONFIRMED',
+  'LOADED',
+  'DEPARTED',
+  'IN_TRANSIT',
+  'DELAYED',
+  'ARRIVED',
+  'UNLOADING',
+  'DELIVERED',
+  'COMPLETED',
+];
 const BOOKING_INCLUDE = {
   truck: {
     // Inline photos are large; lists point at the cover photo URL instead.
@@ -320,11 +351,8 @@ export class BookingsService {
       },
       include: BOOKING_INCLUDE,
     });
-    if (
-      dto.status === BookingStatus.ACCEPTED &&
-      booking.status !== BookingStatus.ACCEPTED
-    ) {
-      await this.ensureShipmentRecord(updated);
+    if (updated.status !== booking.status) {
+      await this.syncShipmentRecord(updated);
     }
     if (
       dto.status === BookingStatus.REJECTED ||
@@ -474,7 +502,9 @@ export class BookingsService {
       ],
       id,
     );
-    return { ...settlement, booking: await this.findOne(actor, id) };
+    const settled = await this.findOne(actor, id);
+    await this.syncShipmentRecord(settled);
+    return { ...settlement, booking: settled };
   }
 
   /** A settled dispute answers any refund request still waiting on the booking. */
@@ -506,16 +536,58 @@ export class BookingsService {
     }
   }
 
-  private async ensureShipmentRecord(booking: {
-    id: string;
-    truckId: string;
-    importerId: string;
-    expectedDeliveryDate: Date;
-    createdAt: Date;
-    cargoRequestId?: string | null;
-    driverId?: string | null;
-    truck: { ownerId: string };
-  }) {
+  /**
+   * Moves the booking's shipment forward to match the booking (trip started, delivered, receipt
+   * confirmed), creating it first if needed. Never moves a shipment backwards: steps the owner
+   * recorded in more detail are kept.
+   */
+  private async syncShipmentRecord(
+    booking: ShipmentSource & { status: BookingStatus; destination: string },
+  ) {
+    const target = SHIPMENT_STEP_FOR_BOOKING[booking.status];
+    if (!target) return;
+    await this.ensureShipmentRecord(booking);
+    const recordId = `sh-${booking.id}`;
+    const record = await this.prisma.operationsRecord.findUnique({
+      where: { domain_recordId: { domain: 'shipments', recordId } },
+    });
+    if (!record) return;
+    const data = record.data as Prisma.JsonObject;
+    const current = typeof data.status === 'string' ? data.status : 'SCHEDULED';
+    if (
+      current === 'CANCELLED' ||
+      SHIPMENT_ORDER.indexOf(current) >= SHIPMENT_ORDER.indexOf(target)
+    ) {
+      return;
+    }
+    const milestones = Array.isArray(data.milestones) ? data.milestones : [];
+    const next = {
+      ...data,
+      status: target,
+      ...(target === 'COMPLETED'
+        ? {
+            milestones: [
+              ...milestones,
+              {
+                id: `${recordId}-received`,
+                kind: 'DELIVERED',
+                at: new Date().toISOString(),
+                place: booking.destination,
+                note: 'The importer confirmed receipt of the cargo.',
+                recordedBy: booking.importerId,
+                simulated: false,
+              },
+            ],
+          }
+        : {}),
+    };
+    await this.prisma.operationsRecord.update({
+      where: { id: record.id },
+      data: { status: target, data: next },
+    });
+  }
+
+  private async ensureShipmentRecord(booking: ShipmentSource) {
     const shipmentId = `sh-${booking.id}`;
     const createdAt = booking.createdAt.toISOString();
     const data = {
