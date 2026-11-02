@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import type { PrismaService } from '../prisma/prisma.service';
 
 export type VerificationStatus =
@@ -78,4 +79,22 @@ export async function verificationByTruck(
       truckVerification(documents.filter((doc) => doc.truckId === id)),
     ]),
   );
+}
+
+/** Shown whenever someone tries to book or quote with a truck that is not verified. */
+export const UNVERIFIED_TRUCK_MESSAGE =
+  'This truck is not verified yet, so it cannot be booked. An administrator must approve its registration, inspection and insurance first.';
+
+/**
+ * Unverified trucks stay visible in the marketplace but can never be booked. Call this before
+ * creating a booking, a quotation, or accepting a quotation.
+ */
+export async function assertTruckVerified(
+  prisma: PrismaService,
+  truckId: string,
+): Promise<void> {
+  const verification = await verificationByTruck(prisma, [truckId]);
+  if (verification.get(truckId) !== 'APPROVED') {
+    throw new BadRequestException(UNVERIFIED_TRUCK_MESSAGE);
+  }
 }

@@ -13,7 +13,10 @@ import { UpdateBookingDto } from './dto/update-booking.dto';
 import { SettleDisputeDto } from './dto/settle-dispute.dto';
 import { UpdateTrackingLocationDto } from './dto/update-tracking-location.dto';
 import { TruckPhotos } from '../trucks/truck-photos';
-import { verificationByTruck } from '../trucks/truck-verification';
+import {
+  assertTruckVerified,
+  verificationByTruck,
+} from '../trucks/truck-verification';
 
 type Actor = { id: string; role: UserRole };
 const BOOKING_INCLUDE = {
@@ -70,6 +73,7 @@ export class BookingsService {
       throw new BadRequestException(
         'Cargo weight exceeds this truck capacity.',
       );
+    await assertTruckVerified(this.prisma, truck.id);
 
     // One atomic statement claims the truck and inserts the booking. It does
     // not need an interactive transaction, which Neon poolers can drop.

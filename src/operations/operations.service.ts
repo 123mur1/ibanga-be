@@ -25,6 +25,7 @@ import type {
 import { CreateDriverDto } from './dto/create-driver.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserSessionCache } from '../prisma/user-session-cache';
+import { assertTruckVerified } from '../trucks/truck-verification';
 
 export type OperationsActor = { id: string; role: UserRole };
 
@@ -894,6 +895,7 @@ export class OperationsService {
     if (truck.status !== TruckStatus.AVAILABLE) {
       throw new ConflictException('This truck is already held by a booking.');
     }
+    await assertTruckVerified(this.prisma, truck.id);
 
     return this.prisma.$transaction(async (transaction) => {
       const lockedRequest = await transaction.operationsRecord.updateMany({
@@ -1269,6 +1271,8 @@ export class OperationsService {
       ) {
         throw new BadRequestException('Quotation details are incomplete.');
       }
+      // Documents can be rejected or expire after the owner quoted, so check again on acceptance.
+      await assertTruckVerified(this.prisma, quotation.truckId);
       const claimedRequest = await transaction.operationsRecord.updateMany({
         where: {
           domain: 'cargo-requests',

@@ -11,6 +11,27 @@ describe('BookingsService', () => {
   let payments: any;
   let service: BookingsService;
 
+  /** Rows the verification query returns for a truck whose required documents are all approved. */
+  const approvedDocuments = (truckId: string) =>
+    ['VEHICLE_REGISTRATION', 'VEHICLE_INSPECTION', 'INSURANCE_POLICY'].map(
+      (type) => ({
+        truckId,
+        type,
+        status: 'APPROVED',
+        expiryDate: '2099-01-01',
+        submittedAt: '2026-01-01T00:00:00Z',
+      }),
+    );
+  const bookingInput = {
+    truckId: 'truck-1',
+    cargoType: 'Produce',
+    cargoWeight: 500,
+    pickupLocation: 'Kigali',
+    destination: 'Musanze',
+    pickupDate: '2030-01-01T10:00:00Z',
+    expectedDeliveryDate: '2030-01-02T10:00:00Z',
+  };
+
   beforeEach(() => {
     prisma = {
       truck: { findUnique: jest.fn(), update: jest.fn() },
@@ -45,21 +66,14 @@ describe('BookingsService', () => {
     };
     const booking = { id: 'booking-1', importerId: importer.id, truck };
     prisma.truck.findUnique.mockResolvedValue(truck);
-    prisma.$queryRaw.mockResolvedValue([{ id: booking.id }]);
+    prisma.$queryRaw
+      .mockResolvedValueOnce(approvedDocuments(truck.id))
+      .mockResolvedValueOnce([{ id: booking.id }]);
     prisma.booking.findUniqueOrThrow.mockResolvedValue(booking);
 
-    await expect(
-      service.create(importer, {
-        truckId: 'truck-1',
-        cargoType: 'Produce',
-        cargoWeight: 500,
-        pickupLocation: 'Kigali',
-        destination: 'Musanze',
-        pickupDate: '2030-01-01T10:00:00Z',
-        expectedDeliveryDate: '2030-01-02T10:00:00Z',
-      }),
-    ).resolves.toBe(booking);
-    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    await expect(service.create(importer, bookingInput)).resolves.toBe(booking);
+    // One query reads the truck's documents, one claims the truck and inserts the booking.
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
     expect(prisma.booking.findUniqueOrThrow).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'booking-1' } }),
     );
@@ -77,6 +91,30 @@ describe('BookingsService', () => {
         ],
       }),
     );
+  });
+
+  it('refuses to book a truck that is not verified, without claiming it', async () => {
+    prisma.truck.findUnique.mockResolvedValue({
+      id: 'truck-1',
+      ownerId: owner.id,
+      status: TruckStatus.AVAILABLE,
+      priceRwf: 80000,
+      capacity: 1000,
+    });
+    // Registration approved, inspection still pending, no insurance submitted.
+    prisma.$queryRaw.mockResolvedValueOnce(
+      approvedDocuments('truck-1')
+        .slice(0, 2)
+        .map((doc, index) =>
+          index === 1 ? { ...doc, status: 'PENDING' } : doc,
+        ),
+    );
+
+    await expect(service.create(importer, bookingInput)).rejects.toThrow(
+      'This truck is not verified yet',
+    );
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    expect(prisma.booking.findUniqueOrThrow).not.toHaveBeenCalled();
   });
 
   it('blocks booking an unapproved or otherwise unavailable truck', async () => {
