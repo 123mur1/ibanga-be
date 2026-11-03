@@ -1,4 +1,7 @@
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { PaymentsService } from './payments.service';
+import { PayBookingDto } from './wallet.dto';
 import { PrismaService } from '../prisma/prisma.service';
 
 describe('PaymentsService', () => {
@@ -60,6 +63,62 @@ describe('PaymentsService', () => {
         ],
       }),
     );
+  });
+
+  it('stores the checkout method, payer and masked account with the payment', async () => {
+    const insertPayment = jest.fn().mockResolvedValue([{ id: 'payment-1' }]);
+    const payments = new PaymentsService({
+      booking: {
+        findUnique: jest.fn().mockResolvedValue({
+          importerId: 'importer-1',
+          status: 'ACCEPTED',
+          agreedPriceRwf: 100000,
+          payment: null,
+          truck: { ownerId: 'owner-1' },
+        }),
+      },
+      bookingPayment: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue({}),
+        findUnique: jest.fn().mockResolvedValue(null),
+      },
+      operationsRecord: {
+        createMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+      $queryRaw: insertPayment,
+    } as unknown as PrismaService);
+
+    await payments.payBooking(
+      { id: 'importer-1', role: 'IMPORTER' },
+      'booking-1',
+      {
+        method: 'VISA',
+        payerName: ' Jeanine Uwase ',
+        accountMask: '**** 4242',
+      },
+    );
+
+    // Tagged-template values follow the SQL strings array.
+    const values = insertPayment.mock.calls[0].slice(1) as unknown[];
+    expect(values).toEqual(
+      expect.arrayContaining(['VISA', 'Jeanine Uwase', '**** 4242']),
+    );
+  });
+
+  it('refuses an account that is not masked, so card numbers are never stored', async () => {
+    const dto = plainToInstance(PayBookingDto, {
+      method: 'VISA',
+      accountMask: '4111 1111 1111 1111',
+    });
+    const errors = await validate(dto);
+    expect(errors.map((error) => error.property)).toEqual(['accountMask']);
+    await expect(
+      validate(
+        plainToInstance(PayBookingDto, {
+          method: 'MTN',
+          accountMask: '0788 *** 220',
+        }),
+      ),
+    ).resolves.toEqual([]);
   });
 
   it('does not create a second payment record for an already paid booking', async () => {

@@ -21,6 +21,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import {
   CreateDepositDto,
   CreateWithdrawalDto,
+  PayBookingDto,
   WalletActor,
 } from './wallet.dto';
 
@@ -174,7 +175,11 @@ export class PaymentsService {
     });
   }
 
-  async payBooking(actor: WalletActor, bookingId: string) {
+  async payBooking(
+    actor: WalletActor,
+    bookingId: string,
+    checkout: PayBookingDto = {},
+  ) {
     if (actor.role !== 'IMPORTER') {
       throw new ForbiddenException('Only importers can pay for bookings.');
     }
@@ -206,12 +211,16 @@ export class PaymentsService {
       const rows = await this.prisma.$queryRaw<{ id: string }[]>`
         INSERT INTO "BookingPayment" (
           "id", "bookingId", "status", "amountRwf", "commissionRwf",
-          "ownerAmountRwf", "fundedAt", "createdAt", "updatedAt"
+          "ownerAmountRwf", "method", "payerName", "accountMask",
+          "fundedAt", "createdAt", "updatedAt"
         )
         SELECT
           ${paymentId}, "id",
           CAST(${BookingPaymentStatus.FUNDED} AS "BookingPaymentStatus"),
-          ${amountRwf}, ${commissionRwf}, ${ownerAmountRwf}, NOW(), NOW(), NOW()
+          ${amountRwf}, ${commissionRwf}, ${ownerAmountRwf},
+          CAST(${checkout.method ?? null} AS "PaymentMethod"),
+          ${checkout.payerName?.trim() || null}, ${checkout.accountMask ?? null},
+          NOW(), NOW(), NOW()
         FROM "Booking"
         WHERE "id" = ${bookingId}
           AND "importerId" = ${actor.id}

@@ -14,6 +14,7 @@ import { RolesGuard } from '../auth/roles.guard';
 import {
   CreateDepositDto,
   CreateWithdrawalDto,
+  PayBookingDto,
   WalletActor,
 } from './wallet.dto';
 import { PaymentsService } from './payments.service';
@@ -66,7 +67,11 @@ export class WalletController {
   }
 
   @Post('bookings/:id/pay')
-  payBooking(@Req() req: AuthedRequest, @Param('id') id: string) {
-    return this.payments.payBooking(req.user, id);
+  payBooking(
+    @Req() req: AuthedRequest,
+    @Param('id') id: string,
+    @Body() dto: PayBookingDto,
+  ) {
+    return this.payments.payBooking(req.user, id, dto);
   }
 }

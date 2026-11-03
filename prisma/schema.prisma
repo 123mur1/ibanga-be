@@ -43,6 +43,12 @@ enum BookingPaymentStatus {
   REFUNDED
 }
 
+enum PaymentMethod {
+  MTN
+  AIRTEL
+  VISA
+}
+
 enum WalletTransactionType {
   DEPOSIT
   BOOKING_PAYMENT
@@ -199,6 +205,11 @@ model BookingPayment {
   amountRwf          Int
   commissionRwf      Int
   ownerAmountRwf     Int
+  /// How the importer paid, as chosen at checkout. Null on payments made before it was stored.
+  method             PaymentMethod?
+  payerName          String?
+  /// Masked only ("**** 4242", "0788 *** 220"); a full card or phone number is never stored.
+  accountMask        String?
   fundedAt           DateTime?
   releasedAt         DateTime?
   createdAt          DateTime             @default(now())
