@@ -8,7 +8,7 @@ import { AppModule } from './app.module';
 const allowedOrigins = new Set(
   [
     'http://localhost:3000',
-    'https://ibanga-fe-1fkh.vercel.app',
+    'https://ibanga-fe-611u.vercel.app',
     process.env.FRONTEND_URL,
     ...(process.env.CORS_ORIGINS ?? '').split(','),
   ]

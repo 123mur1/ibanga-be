@@ -33,19 +33,18 @@ $ npm install
 
 ## Deployment URLs
 
-For the Render web service, set **Root Directory** to `backend`, **Build
-Command** to `npm install && npm run build`, and **Start Command** to
-`npm run start:prod`. The build script caps the TypeScript compiler heap at
-384 MB and skips declaration, source-map, and incremental output to leave
-memory for the rest of the build on a 512 MB instance. If Render reports an
-out-of-memory event after the start command, the service needs more runtime
-memory; a build setting cannot fix a runtime memory failure.
+For the Vercel backend project, set **Root Directory** to `backend`. The
+deployed frontend uses `https://ibanga-be.vercel.app` as its production API by
+default. Set `NEXT_PUBLIC_API_URL` in the frontend's Vercel project to override
+it. In the backend's Vercel project, set `DATABASE_URL`, `JWT_SECRET`, and
+`FRONTEND_URL` to `https://ibanga-fe-611u.vercel.app`. Add any additional
+allowed frontend origins as a comma-separated `CORS_ORIGINS` value, then
+redeploy both projects after changing their environment variables.
 
-The deployed frontend uses `https://ibanga-be-1.onrender.com` as its production
-API by default. Set `NEXT_PUBLIC_API_URL` in Vercel to that URL to override it.
-In Render, set `FRONTEND_URL` to `https://ibanga-fe-1fkh.vercel.app`; add any
-additional allowed frontend origins as a comma-separated `CORS_ORIGINS` value.
-Redeploy both services after changing their environment variables.
+The backend build allows the TypeScript compiler up to 4 GB and skips
+declaration, source-map, and incremental output. If a deployment reports an
+out-of-memory error, check whether it occurred during the build or while a
+function handled a request; those phases need different fixes.
 
 ## Password reset email
 
