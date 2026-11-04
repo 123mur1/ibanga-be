@@ -6,7 +6,7 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "build": "prisma generate && node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json",
+    "build": "prisma generate && node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\" && node --max-old-space-size=384 ./node_modules/typescript/bin/tsc -p tsconfig.build.json --incremental false --declaration false --sourceMap false",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",

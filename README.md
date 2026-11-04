@@ -33,6 +33,14 @@ $ npm install
 
 ## Deployment URLs
 
+For the Render web service, set **Root Directory** to `backend`, **Build
+Command** to `npm install && npm run build`, and **Start Command** to
+`npm run start:prod`. The build script caps the TypeScript compiler heap at
+384 MB and skips declaration, source-map, and incremental output to leave
+memory for the rest of the build on a 512 MB instance. If Render reports an
+out-of-memory event after the start command, the service needs more runtime
+memory; a build setting cannot fix a runtime memory failure.
+
 The deployed frontend uses `https://ibanga-be-1.onrender.com` as its production
 API by default. Set `NEXT_PUBLIC_API_URL` in Vercel to that URL to override it.
 In Render, set `FRONTEND_URL` to `https://ibanga-fe-1fkh.vercel.app`; add any
