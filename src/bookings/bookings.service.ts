@@ -7,6 +7,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { BookingStatus, Prisma, TruckStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { notify } from '../common/notify';
 import { PaymentsService } from '../payments/payments.service';
 import { CreateBookingDto } from './dto/create-booking.dto';
 import { UpdateBookingDto } from './dto/update-booking.dto';
@@ -632,31 +633,17 @@ export class BookingsService {
     notices: { userId: string; role: UserRole; title: string; body: string }[],
     bookingId: string,
   ) {
-    if (!notices.length) return Promise.resolve();
-    const createdAt = new Date().toISOString();
-    return this.prisma.operationsRecord
-      .createMany({
-        data: notices.map(({ userId, role, title, body }) => {
-          const notificationId = randomUUID();
-          return {
-            domain: 'notifications',
-            recordId: notificationId,
-            ownerId: userId,
-            searchText: `${title} ${body} ${bookingId}`,
-            data: {
-              id: notificationId,
-              userId,
-              category: 'BOOKING',
-              title,
-              body,
-              href: `/dashboard/${role === UserRole.IMPORTER ? 'importer' : 'owner'}/bookings/${bookingId}`,
-              read: false,
-              createdAt,
-            },
-          };
-        }),
-      })
-      .then(() => undefined);
+    return notify(
+      this.prisma,
+      notices.map(({ userId, role, title, body }) => ({
+        userId,
+        category: 'BOOKING',
+        title,
+        body,
+        href: `/dashboard/${role === UserRole.IMPORTER ? 'importer' : 'owner'}/bookings/${bookingId}`,
+        searchText: bookingId,
+      })),
+    );
   }
 
   private assertCanView(

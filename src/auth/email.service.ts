@@ -33,6 +33,15 @@ function acceptedRecipients(result: unknown): string[] {
     return addresses;
   }, []);
 }
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 @Injectable()
 export class EmailService {
   private readonly logger = new Logger(EmailService.name);
@@ -59,6 +68,56 @@ export class EmailService {
       throw new ServiceUnavailableException(
         'Password reset email is not configured.',
       );
+    }
+  }
+
+  /** Whether SMTP is set up, without throwing: notification email is skipped when it is not. */
+  isConfigured() {
+    try {
+      this.assertConfigured();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** One activity email, mirroring an in-app notification, with a link to open it in iBanga. */
+  async sendNotificationEmail(input: {
+    to: string;
+    name: string;
+    title: string;
+    body: string;
+    url: string;
+  }) {
+    this.assertConfigured();
+    const fromName = process.env.SMTP_FROM_NAME || 'iBanga';
+    const greeting = `Hello ${input.name.trim() || 'there'},`;
+    const footer =
+      'You are receiving this because of activity on your iBanga account.';
+    const result: unknown = await this.getTransporter().sendMail({
+      from: { name: fromName, address: process.env.SMTP_FROM! },
+      to: input.to,
+      subject: `${input.title} | iBanga`,
+      text: `${greeting}
+
+${input.body}
+
+Open in iBanga: ${input.url}
+
+${footer}`,
+      html: `<div style="font-family:Arial,Helvetica,sans-serif;max-width:560px;margin:0 auto;color:#1f2933;line-height:1.5">
+<p style="font-size:18px;font-weight:bold;margin:0 0 16px">${escapeHtml(input.title)}</p>
+<p>${escapeHtml(greeting)}</p>
+<p>${escapeHtml(input.body)}</p>
+<p style="margin:24px 0"><a href="${escapeHtml(input.url)}" style="background:#1f6feb;color:#ffffff;padding:10px 18px;border-radius:6px;text-decoration:none;display:inline-block">Open in iBanga</a></p>
+<p style="font-size:12px;color:#6b7280">${footer}</p>
+</div>`,
+    });
+    const accepted = acceptedRecipients(result).some(
+      (recipient) => recipient.toLowerCase() === input.to.toLowerCase(),
+    );
+    if (!accepted) {
+      throw new Error('SMTP server did not accept the notification recipient.');
     }
   }
 

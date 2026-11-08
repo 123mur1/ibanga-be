@@ -5,8 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { BookingStatus, DisputeStatus, Prisma, UserRole } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { activeAdminIds, notify } from '../common/notify';
 import { CreateDisputeDto } from './dto/create-dispute.dto';
 
 type Actor = { id: string; role: UserRole };
@@ -64,47 +64,23 @@ export class DisputesService {
     },
     reason: string,
   ) {
-    const admins = await this.prisma.user.findMany({
-      where: { role: UserRole.ADMIN, active: true },
-      select: { id: true },
-    });
     const route = `${booking.pickupLocation} to ${booking.destination}`;
-    const createdAt = new Date().toISOString();
-    const notices = [
-      ...admins.map((admin) => ({
-        userId: admin.id,
+    await notify(this.prisma, [
+      ...(await activeAdminIds(this.prisma)).map((userId) => ({
+        userId,
+        category: 'DISPUTE',
         title: 'Importer reported a problem',
         body: `${route} (${booking.truck.plateNumber}): "${reason}". The payment stays in escrow until you settle the dispute.`,
         href: `/dashboard/admin/bookings/${booking.id}`,
       })),
       {
         userId: booking.truck.ownerId,
+        category: 'DISPUTE',
         title: 'Importer reported a problem',
         body: `The importer reported a problem with ${route}: "${reason}". An administrator will decide the dispute.`,
         href: `/dashboard/owner/bookings/${booking.id}`,
       },
-    ];
-    await this.prisma.operationsRecord.createMany({
-      data: notices.map(({ userId, title, body, href }) => {
-        const id = randomUUID();
-        return {
-          domain: 'notifications',
-          recordId: id,
-          ownerId: userId,
-          searchText: `${title} ${body}`,
-          data: {
-            id,
-            userId,
-            category: 'DISPUTE',
-            title,
-            body,
-            href,
-            read: false,
-            createdAt,
-          },
-        };
-      }),
-    });
+    ]);
   }
 
   findAll(actor: Actor) {

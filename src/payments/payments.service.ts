@@ -18,6 +18,7 @@ import {
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { notify } from '../common/notify';
 import {
   CreateDepositDto,
   CreateWithdrawalDto,
@@ -234,27 +235,15 @@ export class PaymentsService {
         const payment = await this.prisma.bookingPayment.findUniqueOrThrow({
           where: { bookingId },
         });
-        const notificationId = randomUUID();
-        await this.prisma.operationsRecord.createMany({
-          data: [
-            {
-              domain: 'notifications',
-              recordId: notificationId,
-              ownerId: booking.truck.ownerId,
-              searchText: `Importer paid for booking ${bookingId}`,
-              data: {
-                id: notificationId,
-                userId: booking.truck.ownerId,
-                category: 'PAYMENT',
-                title: 'Importer paid for your booking',
-                body: `Payment for booking ${bookingId} is recorded and held until delivery is confirmed.`,
-                href: `/dashboard/owner/payments/${bookingId}`,
-                read: false,
-                createdAt: new Date().toISOString(),
-              },
-            },
-          ],
-        });
+        await notify(this.prisma, [
+          {
+            userId: booking.truck.ownerId,
+            category: 'PAYMENT',
+            title: 'Importer paid for your booking',
+            body: `Payment for booking ${bookingId} is recorded and held until delivery is confirmed.`,
+            href: `/dashboard/owner/payments/${bookingId}`,
+          },
+        ]);
         return payment;
       }
       throw new BadRequestException(

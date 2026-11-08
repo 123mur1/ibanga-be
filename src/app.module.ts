@@ -12,6 +12,7 @@ import { PaymentsModule } from './payments/payments.module';
 import { OperationsModule } from './operations/operations.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { RefundsModule } from './refunds/refunds.module';
+import { NotificationsModule } from './notifications/notifications.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { RefundsModule } from './refunds/refunds.module';
     OperationsModule,
     ReviewsModule,
     RefundsModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
