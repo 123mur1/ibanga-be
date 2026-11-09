@@ -348,4 +348,106 @@ describe('BookingsService', () => {
       expect(prisma.operationsRecord.update).not.toHaveBeenCalled();
     });
   });
+
+  describe('cancelling unpaid bookings', () => {
+    const lockedRow = (overrides: Record<string, unknown> = {}) => ({
+      id: 'booking-1',
+      truckId: 'truck-1',
+      importerId: importer.id,
+      status: BookingStatus.ACCEPTED,
+      createdAt: new Date('2026-11-09T09:00:00Z'),
+      ...overrides,
+    });
+
+    beforeEach(() => {
+      prisma.$transaction = jest.fn((run: (tx: unknown) => unknown) =>
+        run(prisma),
+      );
+      prisma.bookingPayment.count = jest.fn().mockResolvedValue(0);
+      prisma.booking.count = jest.fn().mockResolvedValue(0);
+      prisma.operationsRecord.findMany = jest.fn().mockResolvedValue([]);
+      prisma.truck.update.mockResolvedValue({ ownerId: owner.id });
+      prisma.booking.findUnique.mockResolvedValue({
+        id: 'booking-1',
+        importerId: importer.id,
+        truck: { ownerId: owner.id },
+        payment: null,
+      });
+    });
+
+    it('lets the importer cancel an unpaid booking and frees the truck', async () => {
+      prisma.$queryRaw.mockResolvedValue([lockedRow()]);
+
+      await service.update(importer, 'booking-1', {
+        status: BookingStatus.CANCELLED,
+      });
+
+      expect(prisma.booking.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'booking-1' },
+          data: expect.objectContaining({ status: BookingStatus.CANCELLED }),
+        }),
+      );
+      expect(prisma.truck.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'truck-1' },
+          data: { status: TruckStatus.AVAILABLE },
+        }),
+      );
+    });
+
+    it('refuses to cancel a booking that already has a payment', async () => {
+      prisma.$queryRaw.mockResolvedValue([lockedRow()]);
+      prisma.bookingPayment.count.mockResolvedValue(1);
+
+      await expect(
+        service.update(importer, 'booking-1', {
+          status: BookingStatus.CANCELLED,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+      expect(prisma.booking.update).not.toHaveBeenCalled();
+      expect(prisma.truck.update).not.toHaveBeenCalled();
+    });
+
+    it('does not let the truck owner cancel through this path', async () => {
+      await expect(
+        service.update(owner, 'booking-1', {
+          status: BookingStatus.CANCELLED,
+        }),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it('expires bookings left unpaid past the payment window', async () => {
+      const now = new Date('2026-11-09T09:10:00Z');
+      prisma.booking.findMany.mockResolvedValue([{ id: 'booking-1' }]);
+      prisma.$queryRaw.mockResolvedValue([lockedRow()]);
+
+      await expect(service.expireUnpaidBookings(now)).resolves.toBe(1);
+
+      expect(prisma.booking.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            status: { in: [BookingStatus.PENDING, BookingStatus.ACCEPTED] },
+            createdAt: { lte: new Date('2026-11-09T09:05:00Z') },
+            payment: { is: null },
+          },
+        }),
+      );
+      expect(prisma.truck.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: TruckStatus.AVAILABLE } }),
+      );
+    });
+
+    it('leaves a booking alone if it was paid between the scan and the lock', async () => {
+      prisma.booking.findMany.mockResolvedValue([{ id: 'booking-1' }]);
+      prisma.$queryRaw.mockResolvedValue([lockedRow()]);
+      prisma.bookingPayment.count.mockResolvedValue(1);
+
+      await expect(
+        service.expireUnpaidBookings(new Date('2026-11-09T09:10:00Z')),
+      ).resolves.toBe(0);
+      expect(prisma.booking.update).not.toHaveBeenCalled();
+    });
+  });
 });

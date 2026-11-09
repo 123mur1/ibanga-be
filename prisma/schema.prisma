@@ -29,6 +29,8 @@ enum BookingStatus {
   COMPLETED
   DISPUTED
   REJECTED
+  /// Importer cancelled before paying, or the booking expired unpaid. The truck is freed.
+  CANCELLED
 }
 
 enum DisputeStatus {

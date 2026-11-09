@@ -229,6 +229,8 @@ export class PaymentsService {
           AND NOT EXISTS (
             SELECT 1 FROM "BookingPayment" WHERE "bookingId" = ${bookingId}
           )
+        -- Locks the booking like an unpaid cancel does, so paying and cancelling cannot both win.
+        FOR UPDATE
         RETURNING "id"
       `;
       if (rows.length) {

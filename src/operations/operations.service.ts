@@ -8,6 +8,7 @@ import {
 import { BookingStatus, Prisma, TruckStatus, UserRole } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import * as bcrypt from 'bcryptjs';
+import { isEmail } from 'class-validator';
 import {
   ADMIN_ONLY_DOMAINS,
   ADMIN_WRITE_DOMAINS,
@@ -1568,6 +1569,14 @@ export class OperationsService {
     const name = data.name.trim();
     const email = data.email.trim().toLowerCase();
     const phone = data.phone.trim();
+    // Same rule as register and create-driver: this email is copied onto the user account and
+    // used for notification email, so an invalid one (e.g. "a@gmail.com@gmail.com") is refused.
+    if (!isEmail(email)) {
+      throw new BadRequestException({
+        message: 'Enter a valid email address.',
+        fieldErrors: { email: 'Enter a valid email address.' },
+      });
+    }
     data.name = name;
     data.email = email;
     data.phone = phone;

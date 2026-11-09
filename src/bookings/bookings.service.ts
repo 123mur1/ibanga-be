@@ -2,7 +2,10 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { BookingStatus, Prisma, TruckStatus, UserRole } from '@prisma/client';
@@ -20,6 +23,27 @@ import {
 } from '../trucks/truck-verification';
 
 type Actor = { id: string; role: UserRole };
+
+/** Bookings an importer may still cancel without a fee: nothing has been paid yet. */
+const UNPAID_CANCELLABLE: BookingStatus[] = [
+  BookingStatus.PENDING,
+  BookingStatus.ACCEPTED,
+];
+/** How often unpaid bookings past the payment window are looked for. */
+const EXPIRY_SWEEP_MS = 30_000;
+
+/** Minutes an importer has, from booking, to pay before the booking is cancelled. */
+export function paymentWindowMinutes() {
+  const minutes = Number(process.env.BOOKING_PAYMENT_WINDOW_MINUTES);
+  return Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
+}
+
+type CancelledBooking = {
+  id: string;
+  truckId: string;
+  importerId: string;
+  ownerId: string;
+};
 
 type ShipmentSource = {
   id: string;
@@ -75,12 +99,217 @@ const BOOKING_INCLUDE = {
 } satisfies Prisma.BookingInclude;
 
 @Injectable()
-export class BookingsService {
+export class BookingsService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(BookingsService.name);
+  private expiryTimer: NodeJS.Timeout | null = null;
+  private sweeping = false;
+
   constructor(
     private prisma: PrismaService,
     private payments: PaymentsService,
     private truckPhotos: TruckPhotos = new TruckPhotos(prisma),
   ) {}
+
+  onModuleInit() {
+    this.expiryTimer = setInterval(() => {
+      void this.expireUnpaidBookings();
+    }, EXPIRY_SWEEP_MS);
+    this.expiryTimer.unref();
+    void this.expireUnpaidBookings();
+  }
+
+  onModuleDestroy() {
+    if (this.expiryTimer) clearInterval(this.expiryTimer);
+    this.expiryTimer = null;
+  }
+
+  /**
+   * Cancels every booking still unpaid once the payment window has passed since it was made,
+   * and frees its truck. Runs in the background; a failure is logged and retried next sweep.
+   */
+  async expireUnpaidBookings(now = new Date()) {
+    if (this.sweeping) return 0;
+    this.sweeping = true;
+    try {
+      const minutes = paymentWindowMinutes();
+      const cutoff = new Date(now.getTime() - minutes * 60_000);
+      const expired = await this.prisma.booking.findMany({
+        where: {
+          status: { in: UNPAID_CANCELLABLE },
+          createdAt: { lte: cutoff },
+          payment: { is: null },
+        },
+        select: { id: true },
+        take: 100,
+      });
+      let count = 0;
+      for (const { id } of expired) {
+        const cancelled = await this.cancelIfUnpaid(id, cutoff);
+        if (!cancelled) continue;
+        count += 1;
+        await this.afterCancel(cancelled, [
+          {
+            userId: cancelled.importerId,
+            role: UserRole.IMPORTER,
+            title: 'Booking cancelled: not paid in time',
+            body: `Booking ${id} was not paid within ${minutes} minutes, so it was cancelled and the truck released. You can book again if it is still available.`,
+          },
+          {
+            userId: cancelled.ownerId,
+            role: UserRole.TRUCK_OWNER,
+            title: 'Booking expired unpaid',
+            body: `Booking ${id} was not paid within ${minutes} minutes and was cancelled. Your truck is available again.`,
+          },
+        ]);
+      }
+      if (count) this.logger.log(`Cancelled ${count} unpaid booking(s).`);
+      return count;
+    } catch (error) {
+      this.logger.error(`Unpaid booking sweep failed: ${String(error)}`);
+      return 0;
+    } finally {
+      this.sweeping = false;
+    }
+  }
+
+  /** The importer cancels their own booking before paying. No fee; the truck is freed at once. */
+  async cancelUnpaid(actor: Actor, id: string) {
+    const booking = await this.findOne(actor, id);
+    if (actor.role !== UserRole.ADMIN && booking.importerId !== actor.id) {
+      throw new ForbiddenException(
+        'Only the importer who made this booking can cancel it.',
+      );
+    }
+    const cancelled = await this.cancelIfUnpaid(id);
+    if (!cancelled) {
+      throw new BadRequestException(
+        booking.payment
+          ? 'This booking is already paid. Request a cancellation instead; an administrator reviews paid cancellations.'
+          : 'Only a pending or confirmed booking that has not been paid can be cancelled.',
+      );
+    }
+    await this.afterCancel(cancelled, [
+      {
+        userId: cancelled.ownerId,
+        role: UserRole.TRUCK_OWNER,
+        title: 'Booking cancelled by the importer',
+        body: `The importer cancelled booking ${id} before paying. Your truck is available again.`,
+      },
+    ]);
+    return this.findOne(actor, id);
+  }
+
+  /**
+   * Cancels the booking and frees its truck only if it is still pending or confirmed with no
+   * payment. The booking row is locked first, and payment locks the same row, so a booking that
+   * is being paid at the same moment ends up either paid or cancelled, never both.
+   * `createdBefore` limits it to bookings past the payment window.
+   */
+  private cancelIfUnpaid(
+    id: string,
+    createdBefore?: Date,
+  ): Promise<CancelledBooking | null> {
+    return this.prisma.$transaction(async (transaction) => {
+      const [booking] = await transaction.$queryRaw<
+        {
+          id: string;
+          truckId: string;
+          importerId: string;
+          status: BookingStatus;
+          createdAt: Date;
+        }[]
+      >`
+        SELECT "id", "truckId", "importerId", "status", "createdAt"
+        FROM "Booking" WHERE "id" = ${id} FOR UPDATE
+      `;
+      if (!booking || !UNPAID_CANCELLABLE.includes(booking.status)) return null;
+      if (createdBefore && booking.createdAt > createdBefore) return null;
+      const payments = await transaction.bookingPayment.count({
+        where: { bookingId: id },
+      });
+      if (payments) return null;
+      await transaction.booking.update({
+        where: { id },
+        data: {
+          status: BookingStatus.CANCELLED,
+          trackingLatitude: null,
+          trackingLongitude: null,
+          trackingAccuracy: null,
+          trackingUpdatedAt: null,
+        },
+      });
+      // Free the truck unless another live booking still holds it.
+      const otherActive = await transaction.booking.count({
+        where: {
+          truckId: booking.truckId,
+          id: { not: id },
+          status: {
+            in: [
+              BookingStatus.PENDING,
+              BookingStatus.ACCEPTED,
+              BookingStatus.IN_PROGRESS,
+              BookingStatus.DELIVERED,
+              BookingStatus.DISPUTED,
+            ],
+          },
+        },
+      });
+      const truck = otherActive
+        ? await transaction.truck.findUniqueOrThrow({
+            where: { id: booking.truckId },
+            select: { ownerId: true },
+          })
+        : await transaction.truck.update({
+            where: { id: booking.truckId },
+            data: { status: TruckStatus.AVAILABLE },
+            select: { ownerId: true },
+          });
+      return {
+        id: booking.id,
+        truckId: booking.truckId,
+        importerId: booking.importerId,
+        ownerId: truck.ownerId,
+      };
+    });
+  }
+
+  /**
+   * Marks the booking's shipment (scheduled when it was accepted) and any cargo request it was
+   * booked from as cancelled, then notifies.
+   */
+  private async afterCancel(
+    booking: CancelledBooking,
+    notices: { userId: string; role: UserRole; title: string; body: string }[],
+  ) {
+    const shipment = await this.prisma.operationsRecord.findUnique({
+      where: {
+        domain_recordId: { domain: 'shipments', recordId: `sh-${booking.id}` },
+      },
+    });
+    const cargoRequests = await this.prisma.operationsRecord.findMany({
+      where: {
+        domain: 'cargo-requests',
+        status: 'BOOKED',
+        data: { path: ['bookingId'], equals: booking.id },
+      },
+    });
+    const now = new Date().toISOString();
+    for (const record of [shipment, ...cargoRequests]) {
+      if (!record || record.status === 'CANCELLED') continue;
+      await this.prisma.operationsRecord.update({
+        where: { id: record.id },
+        data: {
+          status: 'CANCELLED',
+          data: {
+            ...(record.data as Prisma.JsonObject),
+            status: 'CANCELLED',
+            updatedAt: now,
+          },
+        },
+      });
+    }
+    await this.notifyUsers(notices, booking.id);
+  }
 
   async create(actor: Actor, dto: CreateBookingDto) {
     if (actor.role !== UserRole.IMPORTER)
@@ -273,6 +502,9 @@ export class BookingsService {
 
   async update(actor: Actor, id: string, dto: UpdateBookingDto) {
     if (!dto.status) throw new BadRequestException('Provide a booking status.');
+    if (dto.status === BookingStatus.CANCELLED) {
+      return this.cancelUnpaid(actor, id);
+    }
     const booking = await this.findOne(actor, id);
     const isOwner = booking.truck.ownerId === actor.id;
     const isImporter = booking.importerId === actor.id;
@@ -395,6 +627,11 @@ export class BookingsService {
           recipients: [UserRole.TRUCK_OWNER],
           title: 'Booking disputed',
           body: `The importer reported a problem with booking ${id}.`,
+        },
+        [BookingStatus.CANCELLED]: {
+          recipients: [UserRole.TRUCK_OWNER],
+          title: 'Booking cancelled',
+          body: `Booking ${id} was cancelled.`,
         },
         [BookingStatus.PENDING]: {
           recipients: [],
