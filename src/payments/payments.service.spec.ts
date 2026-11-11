@@ -23,6 +23,7 @@ describe('PaymentsService', () => {
       importerId: 'importer-1',
       status: 'ACCEPTED',
       agreedPriceRwf: 100000,
+      acceptedAt: new Date(),
       payment: null,
       truck: { ownerId: 'owner-1' },
     });
@@ -45,6 +46,10 @@ describe('PaymentsService', () => {
       payments.payBooking({ id: 'importer-1', role: 'IMPORTER' }, 'booking-1'),
     ).resolves.toEqual(payment);
     expect(insertPayment).toHaveBeenCalledTimes(1);
+    // Only the deposit is taken now: half of the 100,000 RWF price, with 6% commission on it.
+    expect(insertPayment.mock.calls[0].slice(1)).toEqual(
+      expect.arrayContaining([50000, 3000, 47000]),
+    );
     expect(paymentFind).toHaveBeenCalledWith({
       where: { bookingId: 'booking-1' },
     });
@@ -56,7 +61,7 @@ describe('PaymentsService', () => {
             domain: 'notifications',
             ownerId: 'owner-1',
             data: expect.objectContaining({
-              title: 'Importer paid for your booking',
+              title: 'Importer paid the 50% deposit',
               category: 'PAYMENT',
             }),
           }),
@@ -73,6 +78,7 @@ describe('PaymentsService', () => {
           importerId: 'importer-1',
           status: 'ACCEPTED',
           agreedPriceRwf: 100000,
+          acceptedAt: new Date(),
           payment: null,
           truck: { ownerId: 'owner-1' },
         }),
@@ -102,6 +108,88 @@ describe('PaymentsService', () => {
     expect(values).toEqual(
       expect.arrayContaining(['VISA', 'Jeanine Uwase', '**** 4242']),
     );
+  });
+
+  it('refuses the deposit once the hour after acceptance has passed', async () => {
+    const insertPayment = jest.fn();
+    const payments = new PaymentsService({
+      booking: {
+        findUnique: jest.fn().mockResolvedValue({
+          importerId: 'importer-1',
+          status: 'ACCEPTED',
+          agreedPriceRwf: 100000,
+          acceptedAt: new Date(Date.now() - 61 * 60_000),
+          payment: null,
+          truck: { ownerId: 'owner-1' },
+        }),
+      },
+      $queryRaw: insertPayment,
+    } as unknown as PrismaService);
+
+    await expect(
+      payments.payBooking({ id: 'importer-1', role: 'IMPORTER' }, 'booking-1'),
+    ).rejects.toThrow('time to pay the deposit has passed');
+    expect(insertPayment).not.toHaveBeenCalled();
+  });
+
+  it('takes the remaining 50% on receipt, raising the held amount to the full price', async () => {
+    const updateMany = jest.fn().mockResolvedValue({ count: 1 });
+    const payments = new PaymentsService({
+      booking: {
+        findUnique: jest.fn().mockResolvedValue({
+          importerId: 'importer-1',
+          status: 'DELIVERED',
+          agreedPriceRwf: 100001,
+          payment: {
+            status: 'FUNDED',
+            amountRwf: 50001,
+            depositRwf: 50001,
+            balancePaidAt: null,
+          },
+        }),
+      },
+      bookingPayment: {
+        updateMany,
+        findUniqueOrThrow: jest.fn().mockResolvedValue({}),
+      },
+    } as unknown as PrismaService);
+
+    await payments.payBalance(
+      { id: 'importer-1', role: 'IMPORTER' },
+      'booking-1',
+      { method: 'MTN' },
+    );
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { bookingId: 'booking-1', status: 'FUNDED', balancePaidAt: null },
+      data: expect.objectContaining({
+        amountRwf: 100001,
+        balanceRwf: 50000,
+        commissionRwf: 6000,
+        ownerAmountRwf: 94001,
+        method: 'MTN',
+      }),
+    });
+  });
+
+  it('does not take the balance before the cargo is delivered', async () => {
+    const updateMany = jest.fn();
+    const payments = new PaymentsService({
+      booking: {
+        findUnique: jest.fn().mockResolvedValue({
+          importerId: 'importer-1',
+          status: 'IN_PROGRESS',
+          agreedPriceRwf: 100000,
+          payment: { status: 'FUNDED', depositRwf: 50000, balancePaidAt: null },
+        }),
+      },
+      bookingPayment: { updateMany },
+    } as unknown as PrismaService);
+
+    await expect(
+      payments.payBalance({ id: 'importer-1', role: 'IMPORTER' }, 'booking-1'),
+    ).rejects.toThrow('confirm receipt');
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it('refuses an account that is not masked, so card numbers are never stored', async () => {

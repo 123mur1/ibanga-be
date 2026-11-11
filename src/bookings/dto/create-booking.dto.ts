@@ -31,15 +31,47 @@ export class CreateBookingDto {
   @IsPositive()
   cargoWeight: number;
 
+  /** Older clients: the pickup city. New clients send pickupCity (and country and area). */
+  @IsOptional()
   @IsString()
-  @MinLength(2)
   @MaxLength(120)
-  pickupLocation: string;
+  pickupLocation?: string;
 
+  /** Older clients: the destination city. New clients send destinationCity. */
+  @IsOptional()
   @IsString()
-  @MinLength(2)
   @MaxLength(120)
-  destination: string;
+  destination?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  pickupCountry?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  pickupCity?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  pickupArea?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  destinationCountry?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  destinationCity?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  destinationArea?: string;
 
   @IsDateString()
   pickupDate: string;

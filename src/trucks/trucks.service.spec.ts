@@ -25,6 +25,15 @@ describe('TrucksService verified-only marketplace', () => {
   beforeEach(() => {
     prisma = {
       truck: { findMany: jest.fn(), findUnique: jest.fn() },
+      booking: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            truckId: 'truck-verified',
+            pickupDate: new Date('2030-01-05T00:00:00Z'),
+            expectedDeliveryDate: new Date('2030-01-07T00:00:00Z'),
+          },
+        ]),
+      },
       $queryRaw: jest.fn().mockResolvedValue(documentRows),
     };
     const photos = {
@@ -46,6 +55,23 @@ describe('TrucksService verified-only marketplace', () => {
     await expect(
       service.findAll(undefined, undefined, {}).then(ids),
     ).resolves.toEqual([verified.id]);
+  });
+
+  it('lists vehicles whatever their bookings, with the days already booked', async () => {
+    prisma.truck.findMany.mockResolvedValue([verified]);
+
+    const [listed] = await service.findAll(undefined, undefined, {});
+
+    expect(prisma.truck.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.not.objectContaining({
+          status: expect.anything(),
+        }) as unknown,
+      }),
+    );
+    expect(listed).toMatchObject({
+      bookedRanges: [{ start: '2030-01-05', end: '2030-01-07' }],
+    });
   });
 
   it('lists every truck to administrators and an owner their whole fleet', async () => {

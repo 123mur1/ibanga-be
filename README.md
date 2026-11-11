@@ -108,22 +108,100 @@ The owner must explicitly start sharing from the active trip page; location
 updates stop when sharing is stopped or the trip leaves `IN_PROGRESS`. Apply
 the schema update with `npm run prisma:push` before deploying the tracking API.
 
-Every new truck listing requires a whole-number RWF price; each booking
-snapshots that listing price. Owners cannot change the price per booking or
-start a trip before the importer records the simulated booking payment. Dispute
-resolution alone does not release the simulated funds or unlock the truck; the
-importer must still confirm receipt.
+Trucks are priced per kilometre. Each listing has a category, a whole-number
+`pricePerKmRwf`, the cities the owner serves, and the cargo it carries. A
+booking records its pickup and final destination as country → city → area
+(`pickupCountry/City/Area`, `destinationCountry/City/Area`); both cities must be
+the truck's home city or one it serves. The price covers the whole drive, worked
+out on the server (`GET /trucks/:id/quote` shows it before booking): truck
+location → pickup → destination → back to the truck location, each leg stored
+in `routeLegs`, `agreedPriceRwf = total km × pricePerKmRwf`. A truck in Kigali
+fetching cargo in Mombasa for Kigali is priced Kigali → Mombasa → Kigali.
+
+### Booking journey
+
+1. **Request.** The importer sends a request; nothing is paid. It stays
+   `PENDING` until the owner accepts or declines (requests never expire).
+2. **Deposit.** On acceptance (`acceptedAt`) the importer has
+   `BOOKING_PAYMENT_WINDOW_MINUTES` (default 60) to pay **50%** (`POST
+   /wallet/bookings/:id/pay`). Otherwise a background sweep cancels the
+   booking and its days become bookable again.
+3. **Documents.** After the deposit and before the trip starts, the importer
+   uploads cargo and tax documents (`POST /bookings/:id/documents`, PDF or
+   image up to 5 MB; `GET .../documents/:documentId/file` serves them to the
+   importer, owner, the truck's driver and admins). The trip cannot start
+   without one `CARGO` and one `TAX` document.
+4. **Trip.** The owner or the truck's driver starts it and marks it delivered.
+5. **Balance.** The importer confirms receipt and pays the other **50%** in one
+   step (`POST /bookings/:id/confirm-receipt`); the full held amount is then
+   released to the owner, less commission, and the booking completes.
+
+While only the deposit is paid, `BookingPayment.amountRwf` is the deposit
+(`depositRwf`); paying the balance raises it to the price, so dispute and
+cancellation settlements always split the money actually held.
+
+### Trip updates and delays
+
+The truck's driver (a `drivers` operations record whose `userId` is the driver
+account and `assignedTruckId` the truck) or its owner sends `POST
+/bookings/:id/trip-updates` with a message, emailed to the importer and owner.
+With `delayDays` the trip's last day moves later (`TripDelay`). Every later
+`PENDING`/`ACCEPTED` booking of the truck that the new end overlaps gets a
+`DelayImpact`, and its importer is emailed to choose (`POST
+/bookings/:id/delay-impacts/:impactId`): **SHIFT** moves their dates just past
+the delayed trip, and any following booking that would then overlap shifts
+too (those importers are emailed and may still cancel); **REFUND** cancels the
+booking and returns everything paid to the importer's wallet. Drivers can read
+their truck's bookings, start and deliver trips and share GPS.
+
+### Deposit, locations, documents and delays update
+
+```bash
+npx prisma db execute --file prisma/add-deposit-locations-documents-delays.sql --schema prisma/schema.prisma
+npm run prisma:generate
+```
+
+Dispute resolution alone does not release the simulated funds; the importer
+must still confirm receipt.
+
+Every verified truck is listed whatever its bookings, and bookings never change
+the truck's own status. A truck is only taken on the days a live booking covers (pickup through expected delivery); truck
+responses include these as `bookedRanges`, and a booking whose dates overlap
+another is refused. Distances come from the Google Maps Routes API when
+`GOOGLE_MAPS_API_KEY` is set (enable "Routes API" on the key); otherwise they
+are estimated from the listed places' coordinates times a road factor of 1.3.
+
+Anyone can read reviews. Signed-in users post with `POST /trucks/:id/reviews`
+(one per person and truck, never on their own truck); visitors post with
+`POST /trucks/:id/reviews/guest`, giving a name, limited to 5 per hour per
+address.
+
+### Per-kilometre pricing update
+
+For an existing database, apply the additive SQL files, then regenerate the
+client (stop the running backend first on Windows, which locks the engine):
+
+```bash
+npx prisma db execute --file prisma/add-booking-cancelled-status.sql --schema prisma/schema.prisma
+npx prisma db execute --file prisma/add-per-km-pricing.sql --schema prisma/schema.prisma
+npm run prisma:generate
+```
+
+### Seed data
+
+`npm run prisma:seed` creates one truck owner (`SEED_OWNER_EMAIL`, default
+`fleet@ibanga.rw`) with twelve verified vehicles covering every category, the
+main corridors and all cargo types, each with approved registration, inspection
+and insurance documents. Set `SEED_OWNER_PASSWORD`, or the seed generates one
+and prints it once. It can be re-run: the owner is matched by email and each
+vehicle by plate, and nothing else is changed or deleted.
 
 ## Frontend operations data API
 
-The operations UI uses browser-backed demonstration services by default. To
-use the backend for the first connected workflow, copy the frontend
-`.env.example` to `.env.local`, set `NEXT_PUBLIC_DATA_SOURCE=api`,
-`NEXT_PUBLIC_OPS_DATA_SOURCE=api`, and set `NEXT_PUBLIC_API_URL` to the backend
-origin. Start the backend and frontend locally; the frontend reuses its normal
-JWT login and sends the token with requests. In this first integration, cargo
-requests and quotations use the API; the other operations service areas remain
-demonstration-backed until they are implemented.
+The frontend always uses this API; there is no demonstration mode. Copy the
+frontend `.env.example` to `.env.local` and set `NEXT_PUBLIC_API_URL` to the
+backend origin. The frontend reuses its normal JWT login and sends the token
+with requests.
 
 The authenticated `/operations/:domain` API provides persistent records.
 Supported domains are

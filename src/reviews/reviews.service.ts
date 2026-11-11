@@ -4,9 +4,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { BookingStatus, Prisma, UserRole } from '@prisma/client';
+import { Prisma, UserRole } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { CreateReviewDto } from './dto/create-review.dto';
+import { CreateGuestReviewDto, CreateReviewDto } from './dto/create-review.dto';
 
 type Actor = { id: string; role: UserRole };
 
@@ -18,13 +19,9 @@ type StoredReview = {
   rating: number;
   comment: string;
   createdAt: string;
+  /** Posted without an account, under the name the visitor gave. */
+  guest?: boolean;
 };
-
-/** Bookings that count as having shipped with the truck. */
-const REVIEWABLE_BOOKING_STATUSES: BookingStatus[] = [
-  BookingStatus.DELIVERED,
-  BookingStatus.COMPLETED,
-];
 
 /**
  * Importer reviews of trucks. They are stored as operations records (domain "reviews"), so no
@@ -48,41 +45,29 @@ export class ReviewsService {
   }
 
   /**
-   * An importer reviews a truck that has delivered their cargo. One review per importer and
-   * truck: the record id combines both, so a double submission cannot create two.
+   * A signed-in user reviews a vehicle. One review per person and vehicle: the record id combines
+   * both, so a double submission cannot create two. Owners cannot review their own vehicles.
    */
   async create(actor: Actor, truckId: string, dto: CreateReviewDto) {
-    if (actor.role !== UserRole.IMPORTER) {
-      throw new ForbiddenException('Only importers can review a truck.');
-    }
-    const [truck, author, shipped] = await Promise.all([
+    const [truck, author] = await Promise.all([
       this.prisma.truck.findUnique({
         where: { id: truckId },
-        select: { id: true },
+        select: { id: true, ownerId: true },
       }),
       this.prisma.user.findUnique({
         where: { id: actor.id },
         select: { name: true },
       }),
-      this.prisma.booking.count({
-        where: {
-          truckId,
-          importerId: actor.id,
-          status: { in: REVIEWABLE_BOOKING_STATUSES },
-        },
-      }),
     ]);
     if (!truck) throw new NotFoundException('Truck not found.');
-    if (!shipped) {
-      throw new ForbiddenException(
-        'You can review this truck once it has delivered your cargo.',
-      );
+    if (truck.ownerId === actor.id || actor.role === UserRole.ADMIN) {
+      throw new ForbiddenException('You cannot review this vehicle.');
     }
     const review: StoredReview = {
       id: `${truckId}:${actor.id}`,
       truckId,
       authorId: actor.id,
-      authorName: author?.name ?? 'Importer',
+      authorName: author?.name ?? 'iBanga user',
       rating: dto.rating,
       comment: dto.comment,
       createdAt: new Date().toISOString(),
@@ -109,6 +94,36 @@ export class ReviewsService {
     }
     const [withPhoto] = await this.withAuthorPhotos([review]);
     return withPhoto;
+  }
+
+  /** A visitor reviews a vehicle without an account, under the name they give. */
+  async createGuest(truckId: string, dto: CreateGuestReviewDto) {
+    const truck = await this.prisma.truck.findUnique({
+      where: { id: truckId },
+      select: { id: true },
+    });
+    if (!truck) throw new NotFoundException('Truck not found.');
+    const review: StoredReview = {
+      id: `${truckId}:guest:${randomUUID()}`,
+      truckId,
+      authorId: 'guest',
+      authorName: dto.authorName,
+      rating: dto.rating,
+      comment: dto.comment,
+      createdAt: new Date().toISOString(),
+      guest: true,
+    };
+    await this.prisma.operationsRecord.create({
+      data: {
+        domain: 'reviews',
+        recordId: review.id,
+        ownerId: null,
+        truckId,
+        searchText: `${review.authorName} ${review.comment}`,
+        data: review,
+      },
+    });
+    return review;
   }
 
   /** Points each author's avatar at GET /users/:id/photo when they have a photo. */

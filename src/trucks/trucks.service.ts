@@ -10,6 +10,8 @@ import { QueryTrucksDto } from './dto/query-trucks.dto';
 import { UpdateTruckDto } from './dto/update-truck.dto';
 import { TruckPhotos } from './truck-photos';
 import { verificationByTruck } from './truck-verification';
+import { bookedRangesByTruck } from './availability';
+import { quoteTrip, type TripRequest } from '../bookings/trip-quote';
 
 const OWNER_SELECT = {
   id: true,
@@ -35,6 +37,11 @@ const ACTIVE_BOOKING_STATUSES: BookingStatus[] = [
   BookingStatus.DISPUTED,
 ];
 
+/** One-line summary kept for older screens and reports: "Kigali — Kampala, Nairobi". */
+function routeLine(from: string, destinations: string[]) {
+  return `${from} — ${destinations.join(', ')}`.slice(0, 120);
+}
+
 @Injectable()
 export class TrucksService {
   constructor(
@@ -42,9 +49,28 @@ export class TrucksService {
     private truckPhotos: TruckPhotos,
   ) {}
 
+  async quote(id: string, request: TripRequest) {
+    const truck = await this.prisma.truck.findUnique({
+      where: { id },
+      select: {
+        currentLocation: true,
+        destinations: true,
+        pricePerKmRwf: true,
+      },
+    });
+    if (!truck) throw new NotFoundException('Truck not found.');
+    return quoteTrip(truck, request);
+  }
+
   create(ownerId: string, dto: CreateTruckDto) {
     return this.prisma.truck.create({
-      data: { ...dto, ownerId },
+      data: {
+        ...dto,
+        preferredRoute:
+          dto.preferredRoute ??
+          routeLine(dto.currentLocation, dto.destinations),
+        ownerId,
+      },
       include: TRUCK_INCLUDE,
     });
   }
@@ -54,13 +80,16 @@ export class TrucksService {
    * themselves (file contents are not read).
    */
   private async withVerification<T extends { id: string }>(trucks: T[]) {
-    const verification = await verificationByTruck(
-      this.prisma,
-      trucks.map((truck) => truck.id),
-    );
+    const ids = trucks.map((truck) => truck.id);
+    const [verification, booked] = await Promise.all([
+      verificationByTruck(this.prisma, ids),
+      bookedRangesByTruck(this.prisma, ids),
+    ]);
     return trucks.map((truck) => ({
       ...truck,
       verification: verification.get(truck.id) ?? 'NOT_SUBMITTED',
+      // Days already taken, so the calendar can show them and other dates stay bookable.
+      bookedRanges: booked.get(truck.id) ?? [],
     }));
   }
 
@@ -77,6 +106,7 @@ export class TrucksService {
     const listed = withCovers.map((truck, index) => ({
       ...truck,
       verification: withStatus[index].verification,
+      bookedRanges: withStatus[index].bookedRanges,
     }));
     // The marketplace shows importers and visitors verified trucks only. Administrators see every
     // truck, and owners see their whole fleet (`mine`) so they can finish verification.
@@ -105,19 +135,15 @@ export class TrucksService {
     }
 
     return this.prisma.truck.findMany({
+      // Every vehicle is listed whatever its bookings: it is only taken on the booked days.
       where: {
-        ...(userRole === UserRole.ADMIN
-          ? {}
-          : { status: TruckStatus.AVAILABLE }),
         ...(query.location
           ? { currentLocation: { equals: query.location, mode: 'insensitive' } }
           : {}),
         ...(query.truckType
           ? { truckType: { equals: query.truckType, mode: 'insensitive' } }
           : {}),
-        ...(query.route
-          ? { preferredRoute: { contains: query.route, mode: 'insensitive' } }
-          : {}),
+        ...(query.route ? { destinations: { has: query.route } } : {}),
         ...(query.minCapacity ? { capacity: { gte: query.minCapacity } } : {}),
       },
       include: LIST_INCLUDE,
@@ -158,10 +184,19 @@ export class TrucksService {
   }
 
   async update(id: string, ownerId: string, dto: UpdateTruckDto) {
-    await this.findOwned(id, ownerId);
+    const truck = await this.findOwned(id, ownerId);
+    const location = dto.currentLocation ?? truck.currentLocation ?? '';
+    const destinations = dto.destinations ?? truck.destinations;
     return this.prisma.truck.update({
       where: { id },
-      data: dto,
+      data: {
+        ...dto,
+        preferredRoute:
+          dto.preferredRoute ??
+          (dto.currentLocation || dto.destinations
+            ? routeLine(location, destinations)
+            : undefined),
+      },
       include: TRUCK_INCLUDE,
     });
   }

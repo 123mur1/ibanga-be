@@ -27,6 +27,7 @@ import { CreateDriverDto } from './dto/create-driver.dto';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserSessionCache } from '../prisma/user-session-cache';
 import { assertTruckVerified } from '../trucks/truck-verification';
+import { notify, type Notice } from '../common/notify';
 
 export type OperationsActor = { id: string; role: UserRole };
 
@@ -363,6 +364,124 @@ export class OperationsService {
     return truck.ownerId;
   }
 
+  private async validateDriverAssignment(
+    actor: OperationsActor,
+    data: OperationsRecordData,
+    ignoreAssignmentId?: string,
+  ) {
+    const driverId = data.driverId;
+    const truckId = data.truckId;
+    const startDate = data.startDate;
+    const endDate = data.endDate;
+    const ownerId = actor.role === UserRole.ADMIN ? data.ownerId : actor.id;
+    if (
+      typeof driverId !== 'string' ||
+      typeof truckId !== 'string' ||
+      typeof startDate !== 'string' ||
+      typeof endDate !== 'string' ||
+      typeof ownerId !== 'string' ||
+      !Number.isFinite(Date.parse(startDate)) ||
+      !Number.isFinite(Date.parse(endDate)) ||
+      endDate < startDate
+    ) {
+      throw new BadRequestException(
+        'Choose a driver, truck and valid assignment dates.',
+      );
+    }
+
+    const [driver, truck] = await Promise.all([
+      this.prisma.operationsRecord.findUnique({
+        where: {
+          domain_recordId: { domain: 'drivers', recordId: driverId },
+        },
+      }),
+      this.prisma.truck.findUnique({
+        where: { id: truckId },
+        select: { id: true, ownerId: true, plateNumber: true },
+      }),
+    ]);
+    if (!driver) throw new NotFoundException('Driver not found.');
+    if (!truck) throw new NotFoundException('Truck not found.');
+    const driverData = this.recordData(driver.data);
+    if (
+      driver.ownerId !== ownerId ||
+      driverData.ownerId !== ownerId ||
+      truck.ownerId !== ownerId
+    ) {
+      throw new ForbiddenException(
+        'The driver and truck must belong to the same truck owner.',
+      );
+    }
+    if (typeof driverData.userId !== 'string') {
+      throw new BadRequestException(
+        'This driver does not have a sign-in account.',
+      );
+    }
+
+    let importerId: string | undefined;
+    const bookingId =
+      typeof data.bookingId === 'string' ? data.bookingId : undefined;
+    if (bookingId) {
+      const booking = await this.prisma.booking.findUnique({
+        where: { id: bookingId },
+        select: { truckId: true, importerId: true },
+      });
+      if (!booking || booking.truckId !== truckId) {
+        throw new BadRequestException(
+          'The booking must belong to the selected truck.',
+        );
+      }
+      importerId = booking.importerId;
+    }
+
+    const assignments = await this.prisma.operationsRecord.findMany({
+      where: {
+        domain: 'driver-assignments',
+        ownerId,
+        ...(ignoreAssignmentId
+          ? { recordId: { not: ignoreAssignmentId } }
+          : {}),
+      },
+      select: { data: true },
+    });
+    const start = Date.parse(startDate);
+    const end = Date.parse(endDate);
+    const conflicts = assignments.some((assignment) => {
+      const existing = this.recordData(assignment.data);
+      if (
+        (existing.status !== 'ACTIVE' && existing.status !== 'UPCOMING') ||
+        (existing.driverId !== driverId && existing.truckId !== truckId) ||
+        typeof existing.startDate !== 'string' ||
+        typeof existing.endDate !== 'string'
+      ) {
+        return false;
+      }
+      const existingStart = Date.parse(existing.startDate);
+      const existingEnd = Date.parse(existing.endDate);
+      return (
+        Number.isFinite(existingStart) &&
+        Number.isFinite(existingEnd) &&
+        start <= existingEnd &&
+        existingStart <= end
+      );
+    });
+    if (conflicts) {
+      throw new ConflictException(
+        'This driver or truck already has an assignment on those dates.',
+      );
+    }
+
+    return {
+      ownerId,
+      driverUserId: driverData.userId,
+      driverName:
+        typeof driverData.name === 'string' ? driverData.name : 'The driver',
+      plateNumber: truck.plateNumber,
+      bookingId,
+      importerId,
+    };
+  }
+
   /** Keeps the stored file when an update (for example a review decision) arrives without it. */
   private keepStoredFile(
     data: OperationsRecordData,
@@ -641,6 +760,10 @@ export class OperationsService {
     const data = this.normalizeData(domain, input, actor);
     await this.assertDriverDocumentSubmission(domain, actor, data);
     const truckOwner = await this.truckOwnerFor(domain, data, actor);
+    const assignmentContext =
+      domain === 'driver-assignments'
+        ? await this.validateDriverAssignment(actor, data)
+        : undefined;
     if (domain === 'cargo-requests') {
       this.validateCargoRequest(data, dto.draft === true);
     }
@@ -692,6 +815,41 @@ export class OperationsService {
               },
             })
           : await this.prisma.operationsRecord.create({ data: recordData });
+      if (assignmentContext) {
+        const notices: Notice[] = [
+          {
+            userId: assignmentContext.ownerId,
+            category: 'BOOKING',
+            title: 'Driver assigned to a trip',
+            body: `${assignmentContext.driverName} was assigned to truck ${assignmentContext.plateNumber}${assignmentContext.bookingId ? ` for booking ${assignmentContext.bookingId}` : ''}.`,
+            href: assignmentContext.bookingId
+              ? `/dashboard/owner/bookings/${assignmentContext.bookingId}`
+              : '/dashboard/owner/drivers',
+            searchText:
+              assignmentContext.bookingId ?? assignmentContext.plateNumber,
+          },
+          {
+            userId: assignmentContext.driverUserId,
+            category: 'BOOKING',
+            title: 'A trip was assigned to you',
+            body: `You are assigned to truck ${assignmentContext.plateNumber}${assignmentContext.bookingId ? ` for booking ${assignmentContext.bookingId}` : ''}. Check your iBanga driver dashboard for trip details.`,
+            href: '/dashboard/driver',
+            searchText:
+              assignmentContext.bookingId ?? assignmentContext.plateNumber,
+          },
+        ];
+        if (assignmentContext.importerId) {
+          notices.push({
+            userId: assignmentContext.importerId,
+            category: 'BOOKING',
+            title: 'A driver was assigned to your booking',
+            body: `${assignmentContext.driverName} was assigned to truck ${assignmentContext.plateNumber} for booking ${assignmentContext.bookingId}.`,
+            href: `/dashboard/importer/bookings/${assignmentContext.bookingId}`,
+            searchText: assignmentContext.bookingId,
+          });
+        }
+        await notify(this.prisma, notices);
+      }
       return record.data;
     } catch (error) {
       if (
@@ -734,7 +892,7 @@ export class OperationsService {
       }),
       this.prisma.truck.findUnique({
         where: { id: input.assignedTruckId },
-        select: { id: true, ownerId: true },
+        select: { id: true, ownerId: true, plateNumber: true },
       }),
     ]);
     if (
@@ -809,7 +967,7 @@ export class OperationsService {
     };
 
     try {
-      return await this.prisma.$transaction(async (transaction) => {
+      const created = await this.prisma.$transaction(async (transaction) => {
         const user = await transaction.user.create({
           data: {
             name,
@@ -835,8 +993,27 @@ export class OperationsService {
             data: driverData,
           },
         });
-        return driverData;
+        return { driverData, driverUserId: user.id };
       });
+      await notify(this.prisma, [
+        {
+          userId: created.driverUserId,
+          category: 'BOOKING',
+          title: 'You have been added as an iBanga driver',
+          body: `${name}, your account is ready for trips with truck ${truck.plateNumber}. Sign in to view your dashboard and assigned bookings.`,
+          href: '/dashboard/driver',
+          searchText: truck.plateNumber,
+        },
+        {
+          userId: owner.id,
+          category: 'BOOKING',
+          title: 'Driver account created',
+          body: `${name} has been added to your fleet and can access bookings for the assigned truck.`,
+          href: '/dashboard/owner/drivers',
+          searchText: name,
+        },
+      ]);
+      return created.driverData;
     } catch (error) {
       if (
         error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -1476,6 +1653,10 @@ export class OperationsService {
       data.truckId = existing.truckId;
     }
     const truckOwner = await this.truckOwnerFor(domain, data, actor);
+    const assignmentContext =
+      domain === 'driver-assignments'
+        ? await this.validateDriverAssignment(actor, data, recordId)
+        : undefined;
     if (domain === 'cargo-requests') {
       const current = this.recordData(existing.data);
       if (
@@ -1535,6 +1716,76 @@ export class OperationsService {
         ...(domain === 'truck-profiles' ? { ownerId: truckOwner } : {}),
       },
     });
+    if (assignmentContext) {
+      const previous = this.recordData(existing.data);
+      const previousDriverId =
+        typeof previous.driverId === 'string' ? previous.driverId : undefined;
+      const previousDriver =
+        previousDriverId && previousDriverId !== data.driverId
+          ? await this.prisma.operationsRecord.findUnique({
+              where: {
+                domain_recordId: {
+                  domain: 'drivers',
+                  recordId: previousDriverId,
+                },
+              },
+            })
+          : null;
+      const previousUserId = previousDriver
+        ? this.recordData(previousDriver.data).userId
+        : undefined;
+      const cancelled = data.status === 'CANCELLED';
+      const title = cancelled
+        ? 'Driver assignment cancelled'
+        : 'Driver assignment updated';
+      const bookingId =
+        typeof data.bookingId === 'string' ? data.bookingId : undefined;
+      const notices: Notice[] = [
+        {
+          userId: assignmentContext.ownerId,
+          category: 'BOOKING',
+          title,
+          body: cancelled
+            ? `The assignment for ${assignmentContext.driverName} on truck ${assignmentContext.plateNumber} was cancelled.`
+            : `${assignmentContext.driverName}'s assignment on truck ${assignmentContext.plateNumber} was updated.`,
+          href: bookingId
+            ? `/dashboard/owner/bookings/${bookingId}`
+            : '/dashboard/owner/drivers',
+          searchText: bookingId ?? assignmentContext.plateNumber,
+        },
+        {
+          userId: assignmentContext.driverUserId,
+          category: 'BOOKING',
+          title,
+          body: cancelled
+            ? `Your assignment on truck ${assignmentContext.plateNumber} was cancelled.`
+            : `Your assignment on truck ${assignmentContext.plateNumber} was updated.`,
+          href: '/dashboard/driver',
+          searchText: bookingId ?? assignmentContext.plateNumber,
+        },
+      ];
+      if (typeof previousUserId === 'string') {
+        notices.push({
+          userId: previousUserId,
+          category: 'BOOKING',
+          title: 'Driver assignment changed',
+          body: `You were replaced on truck ${assignmentContext.plateNumber}.`,
+          href: '/dashboard/driver',
+          searchText: bookingId ?? assignmentContext.plateNumber,
+        });
+      }
+      if (bookingId && assignmentContext.importerId) {
+        notices.push({
+          userId: assignmentContext.importerId,
+          category: 'BOOKING',
+          title,
+          body: `The driver assignment for booking ${bookingId} was updated.`,
+          href: `/dashboard/importer/bookings/${bookingId}`,
+          searchText: bookingId,
+        });
+      }
+      await notify(this.prisma, notices);
+    }
     return updated.data;
   }
 

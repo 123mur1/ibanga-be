@@ -115,7 +115,16 @@ model Truck {
   plateNumber     String      @unique
   truckType       String
   capacity        Float
+  /// Legacy fixed price, no longer used: trips are priced per kilometre.
   priceRwf        Int?
+  /// Size class, e.g. "Heavy truck"; used to filter the marketplace.
+  category        String?
+  /// The owner's rate. A trip costs the road distance to the destination times this rate.
+  pricePerKmRwf   Int?
+  /// Places the owner delivers to; importers choose their destination from these.
+  destinations    String[]    @default([])
+  /// Cargo the vehicle is suited to carry.
+  acceptedCargo   String[]    @default([])
   currentLocation String?
   preferredRoute  String?
   description     String?
@@ -148,10 +157,27 @@ model Booking {
   additionalInstructions String?
   agreedPrice          String        @default("")
   agreedPriceRwf       Int?
+  /// Road distance from the vehicle's location to the destination, measured when booking.
+  distanceKm           Float?
+  /// The vehicle's rate when the booking was made.
+  pricePerKmRwf        Int?
   trackingLatitude     Float?
   trackingLongitude    Float?
   trackingAccuracy     Float?
   trackingUpdatedAt    DateTime?
+  /// When the owner accepted; the importer then has the payment window to pay the deposit.
+  acceptedAt           DateTime?
+  /// Where the vehicle was when booked: the trip starts and ends there.
+  truckLocation        String?
+  pickupCountry        String?
+  pickupCity           String?
+  /// District, sector or neighbourhood of the pickup.
+  pickupArea           String?
+  destinationCountry   String?
+  destinationCity      String?
+  destinationArea      String?
+  /// Priced legs: vehicle location → pickup → destination → back to the vehicle location.
+  routeLegs            Json?
   createdAt            DateTime      @default(now())
   updatedAt            DateTime      @updatedAt
 
@@ -160,8 +186,12 @@ model Booking {
   dispute              Dispute?
   payment              BookingPayment?
   walletTransactions   WalletTransaction[]
+  documents            BookingDocument[]
+  delays               TripDelay[]
+  delayImpacts         DelayImpact[]
 
   @@index([truckId])
+  @@index([truckId, pickupDate])
   @@index([importerId])
   @@index([status])
   @@index([pickupDate])
@@ -214,6 +244,12 @@ model BookingPayment {
   accountMask        String?
   fundedAt           DateTime?
   releasedAt         DateTime?
+  /// First instalment (half the price), paid within the window after the owner accepts. While
+  /// only the deposit is paid, `amountRwf` is the deposit; paying the balance raises it to the price.
+  depositRwf         Int?
+  /// Second instalment, paid when the importer confirms receipt of the cargo.
+  balanceRwf         Int?
+  balancePaidAt      DateTime?
   createdAt          DateTime             @default(now())
   updatedAt          DateTime             @updatedAt
 
@@ -235,6 +271,60 @@ model Dispute {
 
   @@index([raisedBy])
   @@index([status])
+}
+
+/// Cargo and tax documents the importer uploads after paying the deposit, before the trip starts.
+model BookingDocument {
+  id           String   @id @default(uuid())
+  bookingId    String
+  uploadedById String
+  /// CARGO (packing list, bill of lading, invoice), TAX (customs declaration, tax receipt) or OTHER.
+  kind         String
+  name         String
+  mimeType     String
+  sizeBytes    Int
+  /// Stored inline as a data URL, like the other uploads; never sent in lists.
+  dataUrl      String
+  createdAt    DateTime @default(now())
+
+  booking Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId])
+}
+
+/// A delay reported during a trip: the trip's last day moves later by `delayDays`.
+model TripDelay {
+  id               String   @id @default(uuid())
+  bookingId        String
+  reportedById     String
+  delayDays        Int
+  reason           String
+  previousEndDate  DateTime
+  newEndDate       DateTime
+  createdAt        DateTime @default(now())
+
+  booking Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  impacts DelayImpact[]
+
+  @@index([bookingId])
+}
+
+/// A later booking of the same vehicle that a delay overlaps. Its importer chooses to shift the
+/// dates (later bookings that then overlap shift too) or to cancel with a full refund.
+model DelayImpact {
+  id         String    @id @default(uuid())
+  delayId    String
+  bookingId  String
+  shiftDays  Int
+  /// PENDING (waiting for the importer), SHIFTED or REFUNDED.
+  status     String    @default("PENDING")
+  decidedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  delay   TripDelay @relation(fields: [delayId], references: [id], onDelete: Cascade)
+  booking Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  @@index([bookingId, status])
 }
 
 model OperationsRecord {

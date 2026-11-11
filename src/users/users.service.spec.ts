@@ -22,13 +22,10 @@ type TestPrisma = {
     >;
     update: jest.Mock<Promise<{ id: string; active: boolean }>, [unknown]>;
   };
+  /** Called with the service's callback, which receives the transaction client. */
   $transaction: jest.Mock<
     Promise<unknown>,
-    [
-      (
-        callback: (transaction: TestTransaction) => Promise<unknown>,
-      ) => Promise<unknown>,
-    ]
+    [callback: (transaction: TestTransaction) => Promise<unknown>]
   >;
 };
 
@@ -70,7 +67,10 @@ describe('UsersService', () => {
           .fn<Promise<{ id: string; active: boolean }>, [unknown]>()
           .mockResolvedValue({ id: 'user-1', active: false }),
       },
-      $transaction: jest.fn(async (callback) => callback(transaction)),
+      $transaction: jest.fn(
+        (callback: (transaction: TestTransaction) => Promise<unknown>) =>
+          callback(transaction),
+      ),
     };
     service = new UsersService(prisma as unknown as PrismaService);
   });

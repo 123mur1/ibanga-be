@@ -19,8 +19,10 @@ const allowedOrigins = new Set(
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   app.enableCors({
-    origin: (origin, callback) =>
-      callback(null, !origin || allowedOrigins.has(origin)),
+    origin: (
+      origin: string | undefined,
+      callback: (error: Error | null, allow?: boolean) => void,
+    ) => callback(null, !origin || allowedOrigins.has(origin)),
     credentials: true,
   });
   const server = app.getHttpAdapter().getInstance() as Express;

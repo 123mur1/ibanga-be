@@ -24,3 +24,13 @@ export class CreateReviewDto {
   @MaxLength(1000, { message: 'Keep the review under 1000 characters.' })
   comment: string;
 }
+
+export class CreateGuestReviewDto extends CreateReviewDto {
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value,
+  )
+  @IsString()
+  @MinLength(2, { message: 'Enter your name.' })
+  @MaxLength(60, { message: 'Keep your name under 60 characters.' })
+  authorName: string;
+}

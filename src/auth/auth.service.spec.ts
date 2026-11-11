@@ -41,8 +41,14 @@ describe('AuthService password reset', () => {
   });
 
   it('requests a password reset for an existing user', async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 'user-1', email: 'demo@example.com' });
-    prisma.passwordResetToken.create.mockResolvedValue({ id: 'token-1', userId: 'user-1' });
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      email: 'demo@example.com',
+    });
+    prisma.passwordResetToken.create.mockResolvedValue({
+      id: 'token-1',
+      userId: 'user-1',
+    });
 
     const result = await service.requestPasswordReset('demo@example.com');
 
@@ -57,8 +63,14 @@ describe('AuthService password reset', () => {
   });
 
   it('removes the new token and reports a delivery failure when SMTP rejects the email', async () => {
-    prisma.user.findUnique.mockResolvedValue({ id: 'user-1', email: 'demo@example.com' });
-    prisma.passwordResetToken.create.mockResolvedValue({ id: 'token-1', userId: 'user-1' });
+    prisma.user.findUnique.mockResolvedValue({
+      id: 'user-1',
+      email: 'demo@example.com',
+    });
+    prisma.passwordResetToken.create.mockResolvedValue({
+      id: 'token-1',
+      userId: 'user-1',
+    });
     email.sendPasswordResetEmail.mockRejectedValue(new Error('SMTP rejected'));
     jest.spyOn((service as any).logger, 'error').mockImplementation();
 

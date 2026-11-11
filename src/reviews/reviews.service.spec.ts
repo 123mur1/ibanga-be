@@ -24,7 +24,11 @@ describe('ReviewsService', () => {
 
   beforeEach(() => {
     prisma = {
-      truck: { findUnique: jest.fn().mockResolvedValue({ id: 'truck-1' }) },
+      truck: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ id: 'truck-1', ownerId: 'owner-1' }),
+      },
       user: { findUnique: jest.fn().mockResolvedValue({ name: 'Jeanine' }) },
       booking: { count: jest.fn().mockResolvedValue(1) },
       operationsRecord: {
@@ -56,16 +60,19 @@ describe('ReviewsService', () => {
     });
   });
 
-  it('only lets importers whose cargo the truck delivered review it', async () => {
+  it('lets any signed-in user review without having booked the vehicle', async () => {
     prisma.booking.count.mockResolvedValue(0);
 
     await expect(
-      service.create(importer, 'truck-1', input),
-    ).rejects.toBeInstanceOf(ForbiddenException);
-    expect(prisma.operationsRecord.create).not.toHaveBeenCalled();
+      service.create(
+        { id: 'owner-2', role: UserRole.TRUCK_OWNER },
+        'truck-1',
+        input,
+      ),
+    ).resolves.toMatchObject({ authorId: 'owner-2' });
   });
 
-  it('refuses reviews from other roles', async () => {
+  it('refuses a review of your own vehicle', async () => {
     await expect(
       service.create(
         { id: 'owner-1', role: UserRole.TRUCK_OWNER },
@@ -73,6 +80,28 @@ describe('ReviewsService', () => {
         input,
       ),
     ).rejects.toBeInstanceOf(ForbiddenException);
+    expect(prisma.operationsRecord.create).not.toHaveBeenCalled();
+  });
+
+  it('stores a guest review under the given name, with no account', async () => {
+    const review = await service.createGuest('truck-1', {
+      ...input,
+      authorName: 'Claude M.',
+    });
+
+    expect(review).toMatchObject({
+      truckId: 'truck-1',
+      authorId: 'guest',
+      authorName: 'Claude M.',
+      guest: true,
+    });
+    expect(prisma.operationsRecord.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        domain: 'reviews',
+        ownerId: null,
+        truckId: 'truck-1',
+      }) as unknown,
+    });
   });
 
   it('reports a missing truck', async () => {

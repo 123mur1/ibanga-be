@@ -5,7 +5,6 @@ import {
   Injectable,
   NotFoundException,
   ServiceUnavailableException,
-  UnauthorizedException,
 } from '@nestjs/common';
 import {
   BookingPaymentStatus,
@@ -19,6 +18,8 @@ import {
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { notify } from '../common/notify';
+import { depositOf } from '../bookings/trip-quote';
+import { paymentWindowMinutes } from '../bookings/payment-window';
 import {
   CreateDepositDto,
   CreateWithdrawalDto,
@@ -74,14 +75,18 @@ export class PaymentsService {
     }));
   }
 
-  async getRwandaBanks() {
-    return [{ id: 'MOCK_BANK', code: 'MOCK_BANK', name: 'Simulation bank' }];
+  /** Simulated bank list; a payment provider would supply the real one. */
+  getRwandaBanks() {
+    return Promise.resolve([
+      { id: 'MOCK_BANK', code: 'MOCK_BANK', name: 'Simulation bank' },
+    ]);
   }
 
-  async getRwandaBankBranches(bankCode: string) {
-    return [
+  /** Simulated branches; every simulated bank has the same single branch. */
+  getRwandaBankBranches(_bankCode: string) {
+    return Promise.resolve([
       { id: 'MOCK_BRANCH', code: 'MOCK_BRANCH', name: 'Simulation branch' },
-    ];
+    ]);
   }
 
   async createDeposit(userId: string, dto: CreateDepositDto) {
@@ -202,8 +207,15 @@ export class PaymentsService {
         'This booking already has a payment record.',
       );
     }
+    const acceptedAt = booking.acceptedAt ?? booking.updatedAt;
+    if (Date.now() - acceptedAt.getTime() > paymentWindowMinutes() * 60_000) {
+      throw new BadRequestException(
+        'The time to pay the deposit has passed. The booking will be cancelled and its dates released.',
+      );
+    }
 
-    const amountRwf = booking.agreedPriceRwf;
+    // First instalment: half the price, held in escrow. The balance is paid on receipt.
+    const amountRwf = depositOf(booking.agreedPriceRwf);
     const commissionBps = this.getCommissionBps();
     const commissionRwf = Math.round((amountRwf * commissionBps) / 10000);
     const ownerAmountRwf = amountRwf - commissionRwf;
@@ -212,13 +224,13 @@ export class PaymentsService {
       const rows = await this.prisma.$queryRaw<{ id: string }[]>`
         INSERT INTO "BookingPayment" (
           "id", "bookingId", "status", "amountRwf", "commissionRwf",
-          "ownerAmountRwf", "method", "payerName", "accountMask",
+          "ownerAmountRwf", "depositRwf", "method", "payerName", "accountMask",
           "fundedAt", "createdAt", "updatedAt"
         )
         SELECT
           ${paymentId}, "id",
           CAST(${BookingPaymentStatus.FUNDED} AS "BookingPaymentStatus"),
-          ${amountRwf}, ${commissionRwf}, ${ownerAmountRwf},
+          ${amountRwf}, ${commissionRwf}, ${ownerAmountRwf}, ${amountRwf},
           CAST(${checkout.method ?? null} AS "PaymentMethod"),
           ${checkout.payerName?.trim() || null}, ${checkout.accountMask ?? null},
           NOW(), NOW(), NOW()
@@ -241,8 +253,8 @@ export class PaymentsService {
           {
             userId: booking.truck.ownerId,
             category: 'PAYMENT',
-            title: 'Importer paid for your booking',
-            body: `Payment for booking ${bookingId} is recorded and held until delivery is confirmed.`,
+            title: 'Importer paid the 50% deposit',
+            body: `The deposit (RWF ${amountRwf.toLocaleString('en-RW')}) for booking ${bookingId} is held by iBanga. The importer now uploads the cargo and tax documents; you can start the trip once they are in. The balance is paid when the importer confirms receipt.`,
             href: `/dashboard/owner/payments/${bookingId}`,
           },
         ]);
@@ -263,6 +275,71 @@ export class PaymentsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Second instalment: the importer pays the rest of the price when confirming receipt. The held
+   * amount rises to the full price and the commission and owner share are worked out on it.
+   * Only once: the update only matches a deposit-only payment of a delivered booking.
+   */
+  async payBalance(
+    actor: WalletActor,
+    bookingId: string,
+    checkout: PayBookingDto = {},
+  ) {
+    if (actor.role !== 'IMPORTER') {
+      throw new ForbiddenException('Only importers can pay for bookings.');
+    }
+    const booking = await this.prisma.booking.findUnique({
+      where: { id: bookingId },
+      include: { payment: true },
+    });
+    if (!booking) throw new NotFoundException('Booking not found.');
+    if (booking.importerId !== actor.id) {
+      throw new ForbiddenException('You cannot pay for this booking.');
+    }
+    const payment = booking.payment;
+    if (!payment || payment.status !== BookingPaymentStatus.FUNDED) {
+      throw new BadRequestException('Pay the deposit first.');
+    }
+    if (!payment.depositRwf || payment.balancePaidAt) {
+      return payment; // Paid in full already (older bookings were paid at once).
+    }
+    if (booking.status !== BookingStatus.DELIVERED) {
+      throw new BadRequestException(
+        'The balance is paid when the cargo is delivered and you confirm receipt.',
+      );
+    }
+    const totalRwf = booking.agreedPriceRwf ?? payment.depositRwf * 2;
+    const balanceRwf = totalRwf - payment.depositRwf;
+    const commissionRwf = Math.round(
+      (totalRwf * this.getCommissionBps()) / 10000,
+    );
+    const updated = await this.prisma.bookingPayment.updateMany({
+      where: {
+        bookingId,
+        status: BookingPaymentStatus.FUNDED,
+        balancePaidAt: null,
+      },
+      data: {
+        amountRwf: totalRwf,
+        balanceRwf,
+        balancePaidAt: new Date(),
+        commissionRwf,
+        ownerAmountRwf: totalRwf - commissionRwf,
+        ...(checkout.method ? { method: checkout.method } : {}),
+        ...(checkout.payerName?.trim()
+          ? { payerName: checkout.payerName.trim() }
+          : {}),
+        ...(checkout.accountMask ? { accountMask: checkout.accountMask } : {}),
+      },
+    });
+    if (updated.count !== 1) {
+      throw new ConflictException('The balance has just been paid.');
+    }
+    return this.prisma.bookingPayment.findUniqueOrThrow({
+      where: { bookingId },
+    });
   }
 
   async releaseBookingFunds(bookingId: string) {
@@ -427,6 +504,8 @@ export class PaymentsService {
     bookingId: string,
     refundRwf: number,
     closeBooking: (transaction: Prisma.TransactionClient) => Promise<void>,
+    /** Why the held money moves, for the wallet history ("a dispute", "a trip delay"). */
+    reason = 'a dispute',
   ) {
     const admin = await this.prisma.user.findFirst({
       where: { role: 'ADMIN' },
@@ -518,8 +597,8 @@ export class PaymentsService {
         WalletTransactionType.REFUND,
         `ibanga-refund-${bookingId}`,
         fullRefund
-          ? 'Booking payment refunded after a dispute'
-          : 'Partial refund after a dispute',
+          ? `Booking payment refunded after ${reason}`
+          : `Partial refund after ${reason}`,
       );
       await credit(
         payment.booking.truck.ownerId,
@@ -527,8 +606,8 @@ export class PaymentsService {
         WalletTransactionType.BOOKING_EARNING,
         `ibanga-release-${bookingId}`,
         refundRwf
-          ? 'Booking proceeds released after a dispute (part refunded)'
-          : 'Booking proceeds released after a dispute',
+          ? `Booking proceeds released after ${reason} (part refunded)`
+          : `Booking proceeds released after ${reason}`,
       );
       await credit(
         admin.id,

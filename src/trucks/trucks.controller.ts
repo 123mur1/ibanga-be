@@ -21,6 +21,7 @@ import { CreateTruckDto } from './dto/create-truck.dto';
 import { QueryTrucksDto } from './dto/query-trucks.dto';
 import { UpdateAvailabilityDto } from './dto/update-availability.dto';
 import { UpdateTruckDto } from './dto/update-truck.dto';
+import { TripQuoteQueryDto } from './dto/trip-quote-query.dto';
 import type { Response } from 'express';
 import { sendImage } from '../common/data-url';
 import { TrucksService } from './trucks.service';
@@ -58,6 +59,15 @@ export class TrucksController {
     @Res() res: Response,
   ) {
     sendImage(res, await this.photos.photo(id, index, version ?? ''), version);
+  }
+
+  /**
+   * The price of a trip with this vehicle, worked out exactly as a booking will be: legs from the
+   * vehicle's location to the pickup, to the destination and back, times its rate per km.
+   */
+  @Get(':id/quote')
+  quote(@Param('id') id: string, @Query() query: TripQuoteQueryDto) {
+    return this.trucks.quote(id, query);
   }
 
   @UseGuards(OptionalJwtAuthGuard)

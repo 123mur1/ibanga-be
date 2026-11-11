@@ -7,8 +7,7 @@ import {
   OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
-import { BookingStatus, Prisma, TruckStatus, UserRole } from '@prisma/client';
+import { BookingStatus, Prisma, UserRole } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { notify } from '../common/notify';
 import { PaymentsService } from '../payments/payments.service';
@@ -17,6 +16,15 @@ import { UpdateBookingDto } from './dto/update-booking.dto';
 import { SettleDisputeDto } from './dto/settle-dispute.dto';
 import { UpdateTrackingLocationDto } from './dto/update-tracking-location.dto';
 import { TruckPhotos } from '../trucks/truck-photos';
+import {
+  bookedRangesByTruck,
+  dayKey,
+  isRangeFree,
+} from '../trucks/availability';
+import { quoteTrip } from './trip-quote';
+import { paymentWindowMinutes, windowLabel } from './payment-window';
+import { driverTruckIds, drivesTruck } from './booking-access';
+import type { PayBookingDto } from '../payments/wallet.dto';
 import {
   assertTruckVerified,
   verificationByTruck,
@@ -32,11 +40,10 @@ const UNPAID_CANCELLABLE: BookingStatus[] = [
 /** How often unpaid bookings past the payment window are looked for. */
 const EXPIRY_SWEEP_MS = 30_000;
 
-/** Minutes an importer has, from booking, to pay before the booking is cancelled. */
-export function paymentWindowMinutes() {
-  const minutes = Number(process.env.BOOKING_PAYMENT_WINDOW_MINUTES);
-  return Number.isFinite(minutes) && minutes > 0 ? minutes : 5;
-}
+export { paymentWindowMinutes };
+
+/** Document kinds the importer must upload before the trip can start. */
+export const REQUIRED_DOCUMENT_KINDS = ['CARGO', 'TAX'] as const;
 
 type CancelledBooking = {
   id: string;
@@ -96,6 +103,24 @@ const BOOKING_INCLUDE = {
   },
   payment: true,
   dispute: true,
+  // File contents stay out of lists; GET /bookings/:id/documents/:documentId/file serves them.
+  documents: { omit: { dataUrl: true }, orderBy: { createdAt: 'asc' } },
+  delays: { orderBy: { createdAt: 'asc' } },
+  delayImpacts: {
+    include: {
+      delay: {
+        select: {
+          id: true,
+          bookingId: true,
+          delayDays: true,
+          reason: true,
+          newEndDate: true,
+          createdAt: true,
+        },
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  },
 } satisfies Prisma.BookingInclude;
 
 @Injectable()
@@ -135,9 +160,13 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       const cutoff = new Date(now.getTime() - minutes * 60_000);
       const expired = await this.prisma.booking.findMany({
         where: {
-          status: { in: UNPAID_CANCELLABLE },
-          createdAt: { lte: cutoff },
+          status: BookingStatus.ACCEPTED,
           payment: { is: null },
+          OR: [
+            { acceptedAt: { lte: cutoff } },
+            // Accepted before acceptedAt was recorded: the last update was the acceptance.
+            { acceptedAt: null, updatedAt: { lte: cutoff } },
+          ],
         },
         select: { id: true },
         take: 100,
@@ -147,18 +176,18 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
         const cancelled = await this.cancelIfUnpaid(id, cutoff);
         if (!cancelled) continue;
         count += 1;
-        await this.afterCancel(cancelled, [
+        await this.closeCancelledBooking(cancelled, [
           {
             userId: cancelled.importerId,
             role: UserRole.IMPORTER,
-            title: 'Booking cancelled: not paid in time',
-            body: `Booking ${id} was not paid within ${minutes} minutes, so it was cancelled and the truck released. You can book again if it is still available.`,
+            title: 'Booking cancelled: deposit not paid in time',
+            body: `The 50% deposit for booking ${id} was not paid within ${windowLabel(minutes)} of the owner's acceptance, so the booking was cancelled and its days released. You can book again if the dates are still free.`,
           },
           {
             userId: cancelled.ownerId,
             role: UserRole.TRUCK_OWNER,
             title: 'Booking expired unpaid',
-            body: `Booking ${id} was not paid within ${minutes} minutes and was cancelled. Your truck is available again.`,
+            body: `The importer did not pay the deposit for booking ${id} within ${windowLabel(minutes)}, so it was cancelled. Those days are free on your truck's calendar again.`,
           },
         ]);
       }
@@ -188,12 +217,18 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
           : 'Only a pending or confirmed booking that has not been paid can be cancelled.',
       );
     }
-    await this.afterCancel(cancelled, [
+    await this.closeCancelledBooking(cancelled, [
+      {
+        userId: cancelled.importerId,
+        role: UserRole.IMPORTER,
+        title: 'Booking request cancelled',
+        body: `Your unpaid booking request ${id} was cancelled. No payment was taken and the truck dates were released.`,
+      },
       {
         userId: cancelled.ownerId,
         role: UserRole.TRUCK_OWNER,
         title: 'Booking cancelled by the importer',
-        body: `The importer cancelled booking ${id} before paying. Your truck is available again.`,
+        body: `The importer cancelled booking ${id} before paying. Those days are free on your truck's calendar again.`,
       },
     ]);
     return this.findOne(actor, id);
@@ -203,11 +238,12 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
    * Cancels the booking and frees its truck only if it is still pending or confirmed with no
    * payment. The booking row is locked first, and payment locks the same row, so a booking that
    * is being paid at the same moment ends up either paid or cancelled, never both.
-   * `createdBefore` limits it to bookings past the payment window.
+   * `acceptedBefore` limits it to accepted bookings past the payment window. Only the booked days
+   * are freed; the vehicle itself stays listed.
    */
   private cancelIfUnpaid(
     id: string,
-    createdBefore?: Date,
+    acceptedBefore?: Date,
   ): Promise<CancelledBooking | null> {
     return this.prisma.$transaction(async (transaction) => {
       const [booking] = await transaction.$queryRaw<
@@ -216,14 +252,21 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
           truckId: string;
           importerId: string;
           status: BookingStatus;
-          createdAt: Date;
+          acceptedAt: Date | null;
+          updatedAt: Date;
         }[]
       >`
-        SELECT "id", "truckId", "importerId", "status", "createdAt"
+        SELECT "id", "truckId", "importerId", "status", "acceptedAt", "updatedAt"
         FROM "Booking" WHERE "id" = ${id} FOR UPDATE
       `;
       if (!booking || !UNPAID_CANCELLABLE.includes(booking.status)) return null;
-      if (createdBefore && booking.createdAt > createdBefore) return null;
+      if (
+        acceptedBefore &&
+        (booking.status !== BookingStatus.ACCEPTED ||
+          (booking.acceptedAt ?? booking.updatedAt) > acceptedBefore)
+      ) {
+        return null;
+      }
       const payments = await transaction.bookingPayment.count({
         where: { bookingId: id },
       });
@@ -238,32 +281,11 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
           trackingUpdatedAt: null,
         },
       });
-      // Free the truck unless another live booking still holds it.
-      const otherActive = await transaction.booking.count({
-        where: {
-          truckId: booking.truckId,
-          id: { not: id },
-          status: {
-            in: [
-              BookingStatus.PENDING,
-              BookingStatus.ACCEPTED,
-              BookingStatus.IN_PROGRESS,
-              BookingStatus.DELIVERED,
-              BookingStatus.DISPUTED,
-            ],
-          },
-        },
+      // A cancelled booking no longer counts in the booked days, so its dates are free again.
+      const truck = await transaction.truck.findUniqueOrThrow({
+        where: { id: booking.truckId },
+        select: { ownerId: true },
       });
-      const truck = otherActive
-        ? await transaction.truck.findUniqueOrThrow({
-            where: { id: booking.truckId },
-            select: { ownerId: true },
-          })
-        : await transaction.truck.update({
-            where: { id: booking.truckId },
-            data: { status: TruckStatus.AVAILABLE },
-            select: { ownerId: true },
-          });
       return {
         id: booking.id,
         truckId: booking.truckId,
@@ -277,7 +299,8 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
    * Marks the booking's shipment (scheduled when it was accepted) and any cargo request it was
    * booked from as cancelled, then notifies.
    */
-  private async afterCancel(
+  /** Public so delay refunds close the shipment and cargo request the same way. */
+  async closeCancelledBooking(
     booking: CancelledBooking,
     notices: { userId: string; role: UserRole; title: string; body: string }[],
   ) {
@@ -311,72 +334,106 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
     await this.notifyUsers(notices, booking.id);
   }
 
+  /**
+   * An importer books a vehicle for a span of days. The vehicle stays listed: the booking only
+   * takes the days from pickup to expected delivery, and overlapping requests are refused. The
+   * price is set here, never by the client: road distance from the vehicle's location to the
+   * chosen destination, times the vehicle's rate per km.
+   */
   async create(actor: Actor, dto: CreateBookingDto) {
     if (actor.role !== UserRole.IMPORTER)
       throw new ForbiddenException('Only importers can create bookings.');
-    const pickupDate = new Date(dto.pickupDate);
-    const expectedDeliveryDate = new Date(dto.expectedDeliveryDate);
-    if (expectedDeliveryDate < pickupDate)
-      throw new BadRequestException('Expected delivery must be after pickup.');
+    const start = dayKey(new Date(dto.pickupDate));
+    const end = dayKey(new Date(dto.expectedDeliveryDate));
+    if (end < start)
+      throw new BadRequestException(
+        'The last day must be on or after the first day.',
+      );
+    if (start < dayKey(new Date()))
+      throw new BadRequestException('Choose dates from today onwards.');
 
     const truck = await this.prisma.truck.findUnique({
       where: { id: dto.truckId },
     });
     if (!truck) throw new NotFoundException('Truck not found.');
-    if (truck.status !== TruckStatus.AVAILABLE)
-      throw new BadRequestException('This truck is not available to book.');
-    if (truck.priceRwf === null) {
-      throw new BadRequestException(
-        'This truck has no price and cannot be booked. Ask the owner to update its RWF price.',
-      );
-    }
     if (dto.cargoWeight > truck.capacity)
       throw new BadRequestException(
         'Cargo weight exceeds this truck capacity.',
       );
     await assertTruckVerified(this.prisma, truck.id);
 
-    // One atomic statement claims the truck and inserts the booking. It does
-    // not need an interactive transaction, which Neon poolers can drop.
-    const bookingId = randomUUID();
-    const created = await this.prisma.$queryRaw<{ id: string }[]>`
-      WITH claimed_truck AS (
-        UPDATE "Truck"
-        SET "status" = CAST(${TruckStatus.UNAVAILABLE} AS "TruckStatus")
-        WHERE "id" = ${truck.id}
-          AND "status" = CAST(${TruckStatus.AVAILABLE} AS "TruckStatus")
-        RETURNING "id"
-      )
-      INSERT INTO "Booking" (
-        "id", "truckId", "importerId", "cargoType", "cargoDescription",
-        "cargoWeight", "pickupLocation", "destination", "pickupDate",
-        "expectedDeliveryDate", "additionalInstructions", "agreedPrice",
-        "agreedPriceRwf", "updatedAt"
-      )
-      SELECT
-        ${bookingId}, "id", ${actor.id}, ${dto.cargoType}, ${dto.cargoDescription ?? null},
-        ${dto.cargoWeight}, ${dto.pickupLocation}, ${dto.destination}, ${pickupDate},
-        ${expectedDeliveryDate}, ${dto.additionalInstructions ?? null},
-        ${`RWF ${truck.priceRwf.toLocaleString('en-RW')}`}, ${truck.priceRwf}, NOW()
-      FROM claimed_truck
-      RETURNING "id"
-    `;
-    if (created.length !== 1) {
-      throw new BadRequestException(
-        'This truck was just booked by another importer.',
+    const quote = await quoteTrip(truck, {
+      pickupCity: dto.pickupCity ?? dto.pickupLocation,
+      pickupArea: dto.pickupArea,
+      destinationCity: dto.destinationCity ?? dto.destination,
+      destinationArea: dto.destinationArea,
+    });
+    const priceRwf = quote.priceRwf;
+    const destination = quote.destinationCity;
+    const distance = { km: quote.km };
+
+    const bookingId = await this.prisma.$transaction(async (transaction) => {
+      // Lock the vehicle so two importers cannot book overlapping days at the same moment.
+      await transaction.$queryRaw`
+        SELECT "id" FROM "Truck" WHERE "id" = ${truck.id} FOR UPDATE
+      `;
+      const booked = await bookedRangesByTruck(
+        transaction,
+        [truck.id],
+        new Date(`${start}T00:00:00.000Z`),
       );
-    }
+      if (!isRangeFree(start, end, booked.get(truck.id) ?? [])) {
+        throw new BadRequestException(
+          'Someone booked this vehicle on some of those dates. Choose other dates.',
+        );
+      }
+      const created = await transaction.booking.create({
+        data: {
+          truckId: truck.id,
+          importerId: actor.id,
+          cargoType: dto.cargoType,
+          cargoDescription: dto.cargoDescription ?? null,
+          cargoWeight: dto.cargoWeight,
+          pickupLocation: quote.pickupCity,
+          destination,
+          truckLocation: quote.truckLocation,
+          pickupCountry: quote.pickupCountry,
+          pickupCity: quote.pickupCity,
+          pickupArea: quote.pickupArea,
+          destinationCountry: quote.destinationCountry,
+          destinationCity: quote.destinationCity,
+          destinationArea: quote.destinationArea,
+          routeLegs: quote.legs,
+          pickupDate: new Date(`${start}T00:00:00.000Z`),
+          expectedDeliveryDate: new Date(`${end}T00:00:00.000Z`),
+          additionalInstructions: dto.additionalInstructions ?? null,
+          distanceKm: distance.km,
+          pricePerKmRwf: truck.pricePerKmRwf,
+          agreedPriceRwf: priceRwf,
+          agreedPrice: `RWF ${priceRwf.toLocaleString('en-RW')}`,
+        },
+        select: { id: true },
+      });
+      return created.id;
+    });
+
     const booking = await this.prisma.booking.findUniqueOrThrow({
-      where: { id: created[0].id },
+      where: { id: bookingId },
       include: BOOKING_INCLUDE,
     });
     await this.notifyUsers(
       [
         {
+          userId: actor.id,
+          role: UserRole.IMPORTER,
+          title: 'Booking request sent',
+          body: `Your request to book truck ${truck.plateNumber ?? truck.id} from ${start} to ${end} has been sent. The owner must accept it before your 1-hour deposit payment window starts.`,
+        },
+        {
           userId: truck.ownerId,
           role: UserRole.TRUCK_OWNER,
           title: 'New truck booking',
-          body: `A customer booked your truck for cargo from ${dto.pickupLocation} to ${dto.destination}.`,
+          body: `A customer asks for your truck from ${start} to ${end}: pickup in ${quote.pickupArea ? `${quote.pickupArea}, ` : ''}${quote.pickupCity}, delivery to ${quote.destinationArea ? `${quote.destinationArea}, ` : ''}${destination} (${distance.km} km round trip, RWF ${priceRwf.toLocaleString('en-RW')}). Accept or decline it from your dashboard.`,
         },
       ],
       bookingId,
@@ -390,7 +447,13 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
         ? {}
         : actor.role === UserRole.IMPORTER
           ? { importerId: actor.id }
-          : { truck: { ownerId: actor.id } };
+          : actor.role === UserRole.DRIVER
+            ? // A driver sees the trips of the truck they drive, never other trucks.
+              {
+                truckId: { in: await driverTruckIds(this.prisma, actor.id) },
+                status: { notIn: [BookingStatus.REJECTED] },
+              }
+            : { truck: { ownerId: actor.id } };
     const bookings = await this.prisma.booking.findMany({
       where,
       include: BOOKING_INCLUDE,
@@ -419,8 +482,26 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       include: BOOKING_INCLUDE,
     });
     if (!booking) throw new NotFoundException('Booking not found.');
-    this.assertCanView(actor, booking);
+    if (!(await drivesTruck(this.prisma, actor, booking.truckId))) {
+      this.assertCanView(actor, booking);
+    }
     return booking;
+  }
+
+  /**
+   * The importer confirms the cargo arrived and pays the remaining 50% in the same step; the whole
+   * held amount is then released to the owner and the booking completed. If completing fails
+   * after the balance is paid, trying again does not charge twice.
+   */
+  async confirmReceipt(actor: Actor, id: string, checkout: PayBookingDto) {
+    const booking = await this.findOne(actor, id);
+    if (booking.importerId !== actor.id) {
+      throw new ForbiddenException(
+        'Only the importer who made this booking can confirm receipt.',
+      );
+    }
+    await this.payments.payBalance(actor, id, checkout);
+    return this.update(actor, id, { status: BookingStatus.COMPLETED });
   }
 
   async getTrackingLocation(actor: Actor, id: string) {
@@ -447,12 +528,14 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
     dto: UpdateTrackingLocationDto,
   ) {
     const booking = await this.findOne(actor, id);
+    const ownsTruck =
+      actor.role === UserRole.TRUCK_OWNER && booking.truck.ownerId === actor.id;
     if (
-      actor.role !== UserRole.TRUCK_OWNER ||
-      booking.truck.ownerId !== actor.id
+      !ownsTruck &&
+      !(await drivesTruck(this.prisma, actor, booking.truckId))
     ) {
       throw new ForbiddenException(
-        'Only this booking’s truck owner can share its location.',
+        'Only this bookingâ€™s truck owner or driver can share its location.',
       );
     }
     if (booking.status !== BookingStatus.IN_PROGRESS) {
@@ -485,7 +568,7 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       booking.truck.ownerId !== actor.id
     ) {
       throw new ForbiddenException(
-        'Only this booking’s truck owner can stop location sharing.',
+        'Only this bookingâ€™s truck owner can stop location sharing.',
       );
     }
     await this.prisma.booking.update({
@@ -508,6 +591,7 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
     const booking = await this.findOne(actor, id);
     const isOwner = booking.truck.ownerId === actor.id;
     const isImporter = booking.importerId === actor.id;
+    const isDriver = await drivesTruck(this.prisma, actor, booking.truckId);
     const disputeResolved = booking.dispute?.status === 'RESOLVED';
     if (
       booking.payment?.status === 'RELEASED' &&
@@ -531,6 +615,7 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       isImporter,
       booking.agreedPriceRwf,
       disputeResolved,
+      isDriver,
     );
 
     if (dto.status === BookingStatus.IN_PROGRESS) {
@@ -539,7 +624,22 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       });
       if (payment?.status !== 'FUNDED') {
         throw new BadRequestException(
-          'The importer must pay the agreed price before the trip starts.',
+          'The importer must pay the 50% deposit before the trip starts.',
+        );
+      }
+      const kinds = await this.prisma.bookingDocument.findMany({
+        where: { bookingId: id },
+        select: { kind: true },
+        distinct: ['kind'],
+      });
+      const missing = REQUIRED_DOCUMENT_KINDS.filter(
+        (kind) => !kinds.some((document) => document.kind === kind),
+      );
+      if (missing.length) {
+        throw new BadRequestException(
+          `The importer must upload the ${missing
+            .map((kind) => (kind === 'CARGO' ? 'cargo' : 'tax'))
+            .join(' and ')} documents before the trip starts.`,
         );
       }
     }
@@ -560,6 +660,15 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
             select: { status: true },
           })
         )?.status;
+      if (
+        paymentStatus === 'FUNDED' &&
+        booking.payment?.depositRwf &&
+        !booking.payment.balancePaidAt
+      ) {
+        throw new BadRequestException(
+          'Pay the remaining 50% to confirm receipt and complete the booking.',
+        );
+      }
       if (paymentStatus === 'FUNDED' && isImporter) {
         await this.payments.releaseBookingFunds(id);
       } else if (paymentStatus !== 'RELEASED') {
@@ -573,6 +682,9 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       where: { id },
       data: {
         status: dto.status,
+        ...(dto.status === BookingStatus.ACCEPTED
+          ? { acceptedAt: new Date() }
+          : {}),
         ...(dto.status === BookingStatus.IN_PROGRESS
           ? {}
           : {
@@ -587,36 +699,30 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
     if (updated.status !== booking.status) {
       await this.syncShipmentRecord(updated);
     }
-    if (
-      dto.status === BookingStatus.REJECTED ||
-      dto.status === BookingStatus.COMPLETED
-    ) {
-      await this.prisma.truck.update({
-        where: { id: booking.truckId },
-        data: { status: TruckStatus.AVAILABLE },
-      });
-    }
     if (updated.status !== booking.status) {
+      const deposit = booking.agreedPriceRwf
+        ? `RWF ${Math.ceil(booking.agreedPriceRwf / 2).toLocaleString('en-RW')}`
+        : 'half the price';
       const noticeByStatus = {
         [BookingStatus.ACCEPTED]: {
-          recipients: [UserRole.IMPORTER],
-          title: 'Owner accepted your booking',
-          body: `The truck owner accepted booking ${id}. You can now arrange payment.`,
+          recipients: [UserRole.IMPORTER, UserRole.TRUCK_OWNER],
+          title: 'Owner accepted your booking: pay the deposit within 1 hour',
+          body: `The truck owner accepted booking ${id}. Pay the 50% deposit (${deposit}) within ${windowLabel()}, or the booking is cancelled and the dates released. Then upload your cargo and tax documents before the trip starts.`,
         },
         [BookingStatus.REJECTED]: {
-          recipients: [UserRole.IMPORTER],
+          recipients: [UserRole.IMPORTER, UserRole.TRUCK_OWNER],
           title: 'Booking declined',
           body: `The truck owner declined booking ${id}.`,
         },
         [BookingStatus.IN_PROGRESS]: {
-          recipients: [UserRole.IMPORTER],
+          recipients: [UserRole.IMPORTER, UserRole.TRUCK_OWNER],
           title: 'Trip started',
           body: `Booking ${id} has left pickup and is now in transit.`,
         },
         [BookingStatus.DELIVERED]: {
-          recipients: [UserRole.IMPORTER],
-          title: 'Cargo delivered',
-          body: `Booking ${id} is marked delivered. Confirm receipt or report a problem.`,
+          recipients: [UserRole.IMPORTER, UserRole.TRUCK_OWNER],
+          title: 'Cargo delivered: confirm receipt and pay the balance',
+          body: `Booking ${id} is marked delivered. Confirm you received the cargo and pay the remaining 50%, or report a problem.`,
         },
         [BookingStatus.COMPLETED]: {
           recipients: [UserRole.TRUCK_OWNER, UserRole.IMPORTER],
@@ -629,7 +735,7 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
           body: `The importer reported a problem with booking ${id}.`,
         },
         [BookingStatus.CANCELLED]: {
-          recipients: [UserRole.TRUCK_OWNER],
+          recipients: [UserRole.TRUCK_OWNER, UserRole.IMPORTER],
           title: 'Booking cancelled',
           body: `Booking ${id} was cancelled.`,
         },
@@ -642,7 +748,11 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
         BookingStatus,
         { recipients: UserRole[]; title: string; body: string }
       >;
-      const notice = noticeByStatus[dto.status];
+      const notice: {
+        recipients: UserRole[];
+        title: string;
+        body: string;
+      } = noticeByStatus[dto.status];
       await this.notifyUsers(
         notice.recipients.map((role) => ({
           ...notice,
@@ -654,6 +764,34 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
         })),
         id,
       );
+      if (
+        dto.status === BookingStatus.IN_PROGRESS ||
+        dto.status === BookingStatus.DELIVERED ||
+        dto.status === BookingStatus.COMPLETED
+      ) {
+        const driverRecords = await this.prisma.operationsRecord.findMany({
+          where: {
+            domain: 'drivers',
+            data: { path: ['assignedTruckId'], equals: booking.truckId },
+          },
+          select: { data: true },
+        });
+        const driverIds = driverRecords.flatMap((record) => {
+          const data = record.data as Prisma.JsonObject;
+          return typeof data.userId === 'string' ? [data.userId] : [];
+        });
+        await notify(
+          this.prisma,
+          driverIds.map((userId) => ({
+            userId,
+            category: 'BOOKING',
+            title: notice.title,
+            body: notice.body,
+            href: '/dashboard/driver',
+            searchText: id,
+          })),
+        );
+      }
     }
     return updated;
   }
@@ -695,10 +833,6 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
             trackingAccuracy: null,
             trackingUpdatedAt: null,
           },
-        });
-        await transaction.truck.update({
-          where: { id: booking.truckId },
-          data: { status: TruckStatus.AVAILABLE },
         });
         await transaction.dispute.updateMany({
           where: { bookingId: id, status: 'OPEN' },
@@ -743,6 +877,131 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
     const settled = await this.findOne(actor, id);
     await this.syncShipmentRecord(settled);
     return { ...settlement, booking: settled };
+  }
+
+  /**
+   * An administrator completes an approved cancellation request. A paid booking is settled by
+   * the cancellation policy, worked out here rather than taken from the request: 10% is kept as a
+   * fee (50% once the trip has started) and paid to the owner, the rest is refunded to the
+   * importer's wallet. The booking is cancelled and the request closed in the same transaction.
+   * An unpaid booking is simply cancelled.
+   */
+  async completeCancellation(actor: Actor, bookingId: string) {
+    if (actor.role !== UserRole.ADMIN) {
+      throw new ForbiddenException(
+        'Only an administrator can complete a cancellation.',
+      );
+    }
+    const booking = await this.findOne(actor, bookingId);
+    const request = await this.prisma.operationsRecord.findFirst({
+      where: {
+        domain: 'cancellations',
+        data: { path: ['bookingId'], equals: bookingId },
+        status: 'APPROVED',
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!request) {
+      throw new BadRequestException(
+        'Approve the cancellation request before completing it.',
+      );
+    }
+    const closeRequest = (
+      client: Prisma.TransactionClient | PrismaService,
+      amounts: { feeRwf: number; refundRwf: number },
+    ) =>
+      client.operationsRecord.update({
+        where: { id: request.id },
+        data: {
+          status: 'COMPLETED',
+          data: {
+            ...(request.data as Prisma.JsonObject),
+            ...amounts,
+            status: 'COMPLETED',
+            resolvedAt: new Date().toISOString(),
+          },
+        },
+      });
+
+    const paid = booking.payment?.status === 'FUNDED';
+    let feeRwf = 0;
+    let refundRwf = 0;
+    let cancelled: CancelledBooking;
+    if (paid) {
+      if (
+        booking.status !== BookingStatus.ACCEPTED &&
+        booking.status !== BookingStatus.IN_PROGRESS
+      ) {
+        throw new BadRequestException(
+          'Only a confirmed or in-transit booking can be cancelled. Delivered or disputed bookings are settled through a dispute.',
+        );
+      }
+      const stage = (request.data as Prisma.JsonObject).stage;
+      const pickedUp =
+        booking.status === BookingStatus.IN_PROGRESS ||
+        stage === 'AFTER_PICKUP';
+      const amount = booking.payment!.amountRwf;
+      feeRwf = Math.round(amount * (pickedUp ? 0.5 : 0.1));
+      refundRwf = amount - feeRwf;
+      await this.payments.settleHeldPayment(
+        bookingId,
+        refundRwf,
+        async (transaction) => {
+          await transaction.booking.update({
+            where: { id: bookingId },
+            data: {
+              status: BookingStatus.CANCELLED,
+              trackingLatitude: null,
+              trackingLongitude: null,
+              trackingAccuracy: null,
+              trackingUpdatedAt: null,
+            },
+          });
+          await closeRequest(transaction, { feeRwf, refundRwf });
+        },
+      );
+      cancelled = {
+        id: booking.id,
+        truckId: booking.truckId,
+        importerId: booking.importerId,
+        ownerId: booking.truck.ownerId,
+      };
+    } else {
+      const result = await this.cancelIfUnpaid(bookingId);
+      if (!result) {
+        throw new BadRequestException(
+          'This booking can no longer be cancelled.',
+        );
+      }
+      await closeRequest(this.prisma, { feeRwf, refundRwf });
+      cancelled = result;
+    }
+
+    const rwf = (value: number) => `RWF ${value.toLocaleString('en-RW')}`;
+    await this.closeCancelledBooking(cancelled, [
+      {
+        userId: cancelled.importerId,
+        role: UserRole.IMPORTER,
+        title: 'Booking cancelled',
+        body: paid
+          ? `Booking ${bookingId} is cancelled. ${rwf(refundRwf)} was returned to your iBanga wallet; the ${rwf(feeRwf)} cancellation fee went to the truck owner.`
+          : `Booking ${bookingId} is cancelled. Nothing was charged.`,
+      },
+      {
+        userId: cancelled.ownerId,
+        role: UserRole.TRUCK_OWNER,
+        title: 'Booking cancelled',
+        body: paid
+          ? `Booking ${bookingId} was cancelled by the importer. You receive the ${rwf(feeRwf)} cancellation fee, less commission.`
+          : `Booking ${bookingId} was cancelled before payment.`,
+      },
+    ]);
+    return {
+      bookingId,
+      feeRwf,
+      refundRwf,
+      booking: await this.findOne(actor, bookingId),
+    };
   }
 
   /** A settled dispute answers any refund request still waiting on the booking. */
@@ -904,6 +1163,7 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
     isImporter: boolean,
     agreedPriceRwf: number | null,
     disputeResolved: boolean,
+    isDriver = false,
   ) {
     if (actor.role === UserRole.ADMIN) return;
     const ownerTransitions: Partial<Record<BookingStatus, BookingStatus[]>> = {
@@ -911,13 +1171,20 @@ export class BookingsService implements OnModuleInit, OnModuleDestroy {
       ACCEPTED: [BookingStatus.IN_PROGRESS],
       IN_PROGRESS: [BookingStatus.DELIVERED],
     };
+    // The truck's driver runs the trip (start, deliver) but never accepts or declines work.
+    const driverTransitions: Partial<Record<BookingStatus, BookingStatus[]>> = {
+      ACCEPTED: [BookingStatus.IN_PROGRESS],
+      IN_PROGRESS: [BookingStatus.DELIVERED],
+    };
     const allowed = isOwner
       ? ownerTransitions[current]
-      : isImporter &&
-          (current === BookingStatus.DELIVERED ||
-            (current === BookingStatus.DISPUTED && disputeResolved))
-        ? [BookingStatus.COMPLETED]
-        : [];
+      : isDriver
+        ? driverTransitions[current]
+        : isImporter &&
+            (current === BookingStatus.DELIVERED ||
+              (current === BookingStatus.DISPUTED && disputeResolved))
+          ? [BookingStatus.COMPLETED]
+          : [];
     if (!allowed?.includes(next))
       throw new ForbiddenException(
         'That booking status change is not allowed.',

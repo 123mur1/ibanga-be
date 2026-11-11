@@ -20,6 +20,7 @@ describe('OperationsService', () => {
     };
     operationsRecord: {
       create: jest.Mock;
+      createMany: jest.Mock;
       upsert: jest.Mock;
       findUnique: jest.Mock;
       findMany: jest.Mock;
@@ -43,9 +44,13 @@ describe('OperationsService', () => {
       },
       operationsRecord: {
         create: jest.fn(),
-        upsert: jest.fn().mockImplementation((args: {
-          create: { data: Record<string, JsonValue> };
-        }) => Promise.resolve({ data: args.create.data })),
+        createMany: jest.fn().mockResolvedValue({ count: 0 }),
+        upsert: jest
+          .fn()
+          .mockImplementation(
+            (args: { create: { data: Record<string, JsonValue> } }) =>
+              Promise.resolve({ data: args.create.data }),
+          ),
         findUnique: jest.fn(),
         findMany: jest.fn(),
         findFirst: jest.fn(),
@@ -153,8 +158,9 @@ describe('OperationsService', () => {
     prisma.operationsRecord.findFirst.mockResolvedValue({
       recordId: 'driver-record-1',
     });
-    prisma.operationsRecord.create.mockImplementation((args: { data: { data: Record<string, JsonValue> } }) =>
-      Promise.resolve({ data: args.data.data }),
+    prisma.operationsRecord.create.mockImplementation(
+      (args: { data: { data: Record<string, JsonValue> } }) =>
+        Promise.resolve({ data: args.data.data }),
     );
 
     const submitted = await service.create('documents', driverActor, {
@@ -174,7 +180,9 @@ describe('OperationsService', () => {
       subjectId: 'driver-record-1',
     });
     expect(prisma.operationsRecord.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ ownerId: driverActor.id }) }),
+      expect.objectContaining({
+        data: expect.objectContaining({ ownerId: driverActor.id }),
+      }),
     );
 
     await expect(
@@ -190,6 +198,50 @@ describe('OperationsService', () => {
         },
       }),
     ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('notifies the driver and owner after validating a persisted assignment', async () => {
+    const ownerId = 'owner-1';
+    prisma.operationsRecord.findUnique.mockResolvedValue({
+      ownerId,
+      data: {
+        id: 'driver-1',
+        ownerId,
+        userId: 'driver-user-1',
+        name: 'Driver One',
+      },
+    });
+    prisma.truck.findUnique.mockResolvedValue({
+      id: 'truck-1',
+      ownerId,
+      plateNumber: 'RAH 1',
+    });
+    prisma.operationsRecord.findMany.mockResolvedValue([]);
+    prisma.operationsRecord.create.mockImplementation(
+      (args: { data: { data: Record<string, JsonValue> } }) =>
+        Promise.resolve({ data: args.data.data }),
+    );
+
+    await service.create(
+      'driver-assignments',
+      { id: ownerId, role: UserRole.TRUCK_OWNER },
+      {
+        data: {
+          id: 'assignment-1',
+          driverId: 'driver-1',
+          truckId: 'truck-1',
+          startDate: '2030-01-01',
+          endDate: '2030-01-02',
+          status: 'UPCOMING',
+        },
+      },
+    );
+
+    const notifications =
+      prisma.operationsRecord.createMany.mock.calls[0][0].data;
+    expect(
+      notifications.map((notice: { ownerId: string }) => notice.ownerId).sort(),
+    ).toEqual([ownerId, 'driver-user-1'].sort());
   });
 
   it('creates a persisted driver account and owner-scoped driver record', async () => {
@@ -214,6 +266,7 @@ describe('OperationsService', () => {
     prisma.truck.findUnique.mockResolvedValue({
       id: 'truck-1',
       ownerId: owner.id,
+      plateNumber: 'RAH 1',
     });
     prisma.operationsRecord.findMany.mockResolvedValue([]);
     prisma.user.create.mockImplementation(
@@ -297,6 +350,7 @@ describe('OperationsService', () => {
     prisma.truck.findUnique.mockResolvedValue({
       id: 'truck-1',
       ownerId: 'another-owner',
+      plateNumber: 'RAH 1',
     });
 
     await expect(
@@ -443,7 +497,11 @@ describe('OperationsService', () => {
 
     it('records a truck profile as the truck owner’s when an administrator creates it', async () => {
       await service.create('truck-profiles', admin, {
-        data: { id: 'tp-truck-1', truckId: 'truck-1', verification: 'APPROVED' },
+        data: {
+          id: 'tp-truck-1',
+          truckId: 'truck-1',
+          verification: 'APPROVED',
+        },
       });
 
       expect(storedData().ownerId).toBe(owner.id);

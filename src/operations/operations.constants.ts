@@ -82,6 +82,7 @@ export const DOMAIN_OWNER_FIELDS: Partial<Record<OperationsDomain, string>> = {
   'cargo-requests': 'importerId',
   quotations: 'ownerId',
   drivers: 'ownerId',
+  'driver-assignments': 'ownerId',
   shipments: 'ownerId',
   settlements: 'ownerId',
   payouts: 'ownerId',
